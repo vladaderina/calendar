@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { Task } from '../types';
 import { TaskItem } from './TaskItem';
 import { fmt, taskOnDate, sortByPriority } from '../utils/date';
@@ -16,6 +16,7 @@ export function DayView({ anchor, onEdit }: Props) {
   const isToday = isSameDay(anchor, new Date());
   const [adding, setAdding] = useState(false);
   const [val, setVal] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const dayTasks = sortByPriority(tasks.filter((t) => t.startDate && !t.unplanned && taskOnDate(t, anchor)));
 
@@ -42,9 +43,13 @@ export function DayView({ anchor, onEdit }: Props) {
 
   const submit = () => {
     const t = val.trim();
-    if (t) store.add({ title: t, startDate: iso, endDate: iso });
-    setVal('');
-    setAdding(false);
+    if (t) {
+      store.add({ title: t, startDate: iso, endDate: iso });
+      setVal('');
+      inputRef.current?.focus();
+    } else {
+      setAdding(false);
+    }
   };
 
   return (
@@ -52,20 +57,13 @@ export function DayView({ anchor, onEdit }: Props) {
       <div className={`day-header ${isToday ? 'today' : ''}`}>
         {isToday && <span className="today-label">Сегодня</span>}
       </div>
-      <div
-        className="day-list"
-        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
-        onDrop={(e) => {
-          e.preventDefault();
-          const id = e.dataTransfer.getData('text/task-id');
-          if (id) store.update(id, { startDate: iso, endDate: iso, unplanned: false });
-        }}
-      >
+      <div className="day-list">
         {dayTasks.map((t) => (
           <TaskItem key={t.id} task={t} date={anchor} onEdit={() => onEdit(t)} onReorder={reorderInDay} />
         ))}
         {adding ? (
           <input
+            ref={inputRef}
             autoFocus
             className="quick-add"
             value={val}

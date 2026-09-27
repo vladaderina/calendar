@@ -16,10 +16,16 @@ function isBlocked(t: Task, all: Task[]): boolean {
 
 function QuickAdd({ sphere, onDone }: { sphere: string; onDone: () => void }) {
   const [val, setVal] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
   const submit = () => {
     const t = val.trim();
-    if (t) store.add({ title: t, sphere });
-    onDone();
+    if (t) {
+      store.add({ title: t, sphere });
+      setVal('');
+      inputRef.current?.focus();
+    } else {
+      onDone();
+    }
   };
   const allTasks = useTasks();
   const q = val.trim().toLowerCase();
@@ -28,10 +34,9 @@ function QuickAdd({ sphere, onDone }: { sphere: string; onDone: () => void }) {
         .filter((title) => title.toLowerCase().includes(q))
         .slice(0, 5)
     : [];
-
   return (
     <div className="quick-add-wrap">
-      <input autoFocus className="quick-add" placeholder=""
+      <input ref={inputRef} autoFocus className="quick-add" placeholder=""
         value={val} onChange={(e) => setVal(e.target.value)}
         onBlur={submit}
         onKeyDown={(e) => { if (e.key === 'Enter') submit(); else if (e.key === 'Escape') onDone(); }} />
@@ -51,6 +56,8 @@ function QuickAdd({ sphere, onDone }: { sphere: string; onDone: () => void }) {
     </div>
   );
 }
+
+import { useRef } from 'react';
 
 function EditableName({ value, onChange, onDelete }: { value: string; onChange: (v: string) => void; onDelete: () => void }) {
   return (
@@ -79,10 +86,11 @@ export function DashboardView({ onEdit }: Props) {
   const [newSphere, setNewSphere] = useState('');
   const [creating, setCreating] = useState(false);
 
+  // Unplanned (backlog) tasks: show them, including completed (just dimmed, not deleted).
   const bySphere = new Map<string, Task[]>();
   for (const s of spheres) bySphere.set(s, []);
   for (const t of tasks) {
-    if (t.startDate || t.completed) continue;
+    if (!t.unplanned) continue;
     if (!t.sphere || !bySphere.has(t.sphere)) continue;
     bySphere.get(t.sphere)!.push(t);
   }
@@ -102,9 +110,9 @@ export function DashboardView({ onEdit }: Props) {
           <div className="sphere-block" key={s}>
             <div className="sphere-title">
               {editingName === s ? (
-                <EditableName 
-                  value={s} 
-                  onChange={(v) => { store.renameSphere(s, v); setEditingName(null); }} 
+                <EditableName
+                  value={s}
+                  onChange={(v) => { store.renameSphere(s, v); setEditingName(null); }}
                   onDelete={() => { store.removeSphere(s); setEditingName(null); }}
                 />
               ) : (
@@ -119,8 +127,8 @@ export function DashboardView({ onEdit }: Props) {
                 <TaskItem key={t.id} task={t} blocked={isBlocked(t, tasks)} onEdit={() => onEdit(t)} />
               ))}
               {addingIn === s && <QuickAdd sphere={s} onDone={() => setAddingIn(null)} />}
-              {list.length === 0 && addingIn !== s && (
-                <div className="empty-line" onClick={() => setAddingIn(s)} />
+              {addingIn !== s && (
+                <div className="add-line" onClick={() => setAddingIn(s)} />
               )}
             </div>
           </div>

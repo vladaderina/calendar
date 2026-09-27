@@ -56,7 +56,7 @@ export default function App() {
 
   const title = (() => {
     switch (view) {
-      case 'dashboard': return 'ДАШБОРД';
+      case 'dashboard': return 'Дашборд';
       case 'day': return fmt.full(anchor).toUpperCase();
       case 'week':
       case 'month': return fmt.monthYear(anchor);

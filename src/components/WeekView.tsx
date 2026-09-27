@@ -26,12 +26,18 @@ function plural(n: number): string {
 
 function QuickAdd({ defaults, onDone }: { defaults: Partial<Task>; onDone: () => void }) {
   const [val, setVal] = useState('');
-  const allTasks = useTasks();
+  const inputRef = useRef<HTMLInputElement>(null);
   const submit = () => {
     const t = val.trim();
-    if (t) store.add({ title: t, ...defaults });
-    onDone();
+    if (t) {
+      store.add({ title: t, ...defaults });
+      setVal('');
+      inputRef.current?.focus();
+    } else {
+      onDone();
+    }
   };
+  const allTasks = useTasks();
   const q = val.trim().toLowerCase();
   const suggestions = q
     ? Array.from(new Set(allTasks.map((t) => t.title)))
@@ -40,7 +46,7 @@ function QuickAdd({ defaults, onDone }: { defaults: Partial<Task>; onDone: () =>
     : [];
   return (
     <div className="quick-add-wrap">
-      <input autoFocus className="quick-add" placeholder=""
+      <input ref={inputRef} autoFocus className="quick-add" placeholder=""
         value={val} onChange={(e) => setVal(e.target.value)}
         onBlur={submit}
         onKeyDown={(e) => { if (e.key === 'Enter') submit(); else if (e.key === 'Escape') onDone(); }} />
@@ -60,6 +66,7 @@ function QuickAdd({ defaults, onDone }: { defaults: Partial<Task>; onDone: () =>
     </div>
   );
 }
+import { useRef } from 'react';
 
 export function WeekView({ anchor, onEdit, onPickDate }: Props) {
   const tasks = useTasks();
@@ -149,7 +156,7 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
           ))}
           {adding === iso
             ? <QuickAdd defaults={{ startDate: iso, endDate: iso }} onDone={() => setAdding(null)} />
-            : <div className="add-line" onClick={(e) => { e.stopPropagation(); setAdding(iso); }}>+ добавить</div>}
+            : <div className="add-line" onClick={(e) => { e.stopPropagation(); setAdding(iso); }} />}
         </div>
       </div>
     );
@@ -161,9 +168,7 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
 
   return (
     <div className="week-grid">
-      <div className="week-row">
-        {workdays.map(renderDayCell)}
-      </div>
+      {/* Second row: backlog (left), soon, then Sat, Sun (right) */}
       <div className="week-row">
         <div className="cell">
           <div className="cell-header">
@@ -176,7 +181,7 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
             onDrop={(e) => {
               e.preventDefault();
               const id = e.dataTransfer.getData('text/task-id');
-              // Dropping into "ДРУГОЕ" makes the task an unplanned backlog item.
+              // Dropping into "ДРУГОЕ" turns the task into an unplanned backlog item.
               if (id) store.update(id, { unplanned: true, startDate: undefined, endDate: undefined });
             }}
           >
@@ -185,7 +190,7 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
             ))}
             {adding === OTHER
               ? <QuickAdd defaults={{ unplanned: true }} onDone={() => setAdding(null)} />
-              : <div className="add-line" onClick={(e) => { e.stopPropagation(); setAdding(OTHER); }}>+ добавить</div>}
+              : <div className="add-line" onClick={(e) => { e.stopPropagation(); setAdding(OTHER); }} />}
           </div>
         </div>
 
@@ -208,6 +213,11 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
 
         {renderDayCell(sat)}
         {renderDayCell(sun)}
+      </div>
+
+      {/* First row: Пн–Пт */}
+      <div className="week-row">
+        {workdays.map(renderDayCell)}
       </div>
     </div>
   );

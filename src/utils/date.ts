@@ -15,6 +15,7 @@ export const fmt = {
   },
   monthYear: (d: Date) => {
     const s = format(d, 'LLLL yyyy', { locale: ru });
+    // small-caps in CSS handles the casing visually; here we keep it readable.
     return s.charAt(0).toUpperCase() + s.slice(1);
   },
   monthOnly: (d: Date) => format(d, 'LLLL', { locale: ru }).toUpperCase(),

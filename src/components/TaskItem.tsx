@@ -55,8 +55,8 @@ export function TaskItem({ task, date, blocked, onEdit, onReorder }: Props) {
     <div
       className={cls}
       style={hl ? ({ ['--hl' as any]: bg } as any) : undefined}
-      onClick={() => toggle()}
-      onContextMenu={(e) => { e.preventDefault(); onEdit?.(); }}
+      onClick={(e) => { e.stopPropagation(); toggle(); }}
+      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onEdit?.(); }}
       draggable
       onDragStart={(e) => {
         e.stopPropagation();
