@@ -75,16 +75,41 @@ export function isDoneOn(t: Task, date: Date): boolean {
 const PRIORITY_WEIGHT: Record<string, number> = { high: 0, normal: 1, low: 2 };
 export function sortByPriority<T extends { priority: string; createdAt: string; order?: number }>(arr: T[]): T[] {
   return [...arr].sort((a, b) => {
-    if (a.order != null && b.order != null) return a.order - b.order;
     const pa = PRIORITY_WEIGHT[a.priority] ?? 1;
     const pb = PRIORITY_WEIGHT[b.priority] ?? 1;
     if (pa !== pb) return pa - pb;
+    // Same priority: order within the group, then createdAt as a tiebreaker.
+    if (a.order != null && b.order != null) return a.order - b.order;
     return a.createdAt.localeCompare(b.createdAt);
   });
 }
 
 export function daysUntil(iso: string): number {
   return differenceInCalendarDays(parseISO(iso), new Date());
+}
+
+// Find the next occurrence date (yyyy-MM-dd) on or after today for a task,
+// honoring recurrence rules, exclusions, and recurrenceUntil. Returns null
+// when there are no upcoming (or today's) occurrences left.
+export function nextOccurrence(t: Task): string | null {
+  if (!t.startDate) return null;
+  const today = startOfDay(new Date());
+  const start = startOfDay(parseISO(t.startDate));
+  let cursor = today;
+  // Walk forward day by day; most series have frequent enough occurrences
+  // (daily/weekly/monthly) that this is bounded and cheap.
+  let guard = 0;
+  while (cursor <= addYears(today, 2) && guard < 1000) {
+    const iso = format(cursor, 'yyyy-MM-dd');
+    if (taskOnDate(t, cursor)) {
+      // A recurrence occurrence can be explicitly excluded ("only this one").
+      // taskOnDate already checks excludedDates, but double-check safety:
+      if (!t.excludedDates?.includes(iso)) return iso;
+    }
+    cursor = addDays(cursor, 1);
+    guard++;
+  }
+  return null;
 }
 
 export { addDays, addMonths, addWeeks, addYears, isSameDay, parseISO };

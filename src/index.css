@@ -37,16 +37,36 @@ input, select, textarea { font-family: inherit; }
   flex-shrink: 0;
 }
 .header-title {
-  display: flex; align-items: center; gap: 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
 }
-.header h1 {
-  margin: 0;
-  font-size: clamp(30px, 3.8vw, 46px);
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  text-transform: none;
-  font-variant: small-caps;
+.clear-all-btn {
+  background: transparent;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  opacity: 0.5;
+  transition: opacity 0.18s;
   line-height: 1;
+}
+.clear-all-btn:hover { opacity: 1; color: #e53935; }
+.header h1 {
+  font-family: SuisseIntl, sans-serif;
+  font-size: 36px;
+  font-weight: 700;
+  line-height: 48px;
+  letter-spacing: -1px;
+  color: #000000;
+  background-color: #FFFFFF;
+  margin: 0;
+  text-transform: lowercase;
+  padding: 0 4px;
+}
+.header h1::first-letter {
+  text-transform: uppercase;
 }
 .header h1.clickable {
   cursor: pointer;
@@ -140,7 +160,7 @@ input, select, textarea { font-family: inherit; }
 .today-btn { font-size: 15px; color: var(--muted); text-transform: lowercase; }
 .today-btn:hover { color: var(--ink); }
 
-.content { flex: 1; min-height: 0; padding: 6px 32px 6px; overflow-y: auto; overflow-x: hidden; display: block; }
+.content { flex: 1; min-height: 0; padding: 6px 32px 6px; overflow-y: auto; overflow-x: hidden; display: block; height: 100%; }
 
 /* ============ WEEK ============ */
 .week-grid {
@@ -152,6 +172,7 @@ input, select, textarea { font-family: inherit; }
 /* Two rows share the vertical space so blocks fill the screen; they can
    still grow past it (page scrolls) when a day holds many tasks. */
 .week-row { display: flex; gap: 28px; align-items: stretch; flex: 1 0 auto; min-height: 260px; }
+.week-row.bottom-row { justify-content: space-between; }
 .week-row > .cell { flex: 1; min-width: 0; }
 
 .cell { display: flex; flex-direction: column; min-height: 260px; }
@@ -167,13 +188,13 @@ input, select, textarea { font-family: inherit; }
   opacity: 0.7;
 }
 .cell-header.today { border-bottom-color: var(--accent); border-bottom-width: 2px; }
-.cell-title { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; }
-.cell-title.muted { color: var(--muted); font-weight: 800; letter-spacing: 0.05em; font-size: 26px; }
+.cell-title { font-size: 24px; font-weight: 700; letter-spacing: -0.01em; }
+.cell-title.muted { color: var(--ink, #111); font-weight: 700; letter-spacing: 0.05em; font-size: 20px; }
 .cell-title.today {
   color: var(--accent);
   font-weight: 700;
 }
-.cell-weekday { font-size: 22px; color: var(--muted); font-weight: 500; }
+.cell-weekday { font-size: 18px; color: var(--muted); font-weight: 500; }
 .cell-weekday.today { color: var(--accent); font-weight: 600; }
 
 /* Ruled task area. The ruled background sits below content and starts
@@ -209,8 +230,8 @@ input, select, textarea { font-family: inherit; }
   border-radius: 0;
 }
 .task:hover .title { color: #000; }
-.task.completed .title { text-decoration: line-through; color: var(--muted); }
-.task.unplanned .title { color: var(--grey-task); }
+.task.completed .title { text-decoration: line-through; color: var(--ink, #111); opacity: 0.6; }
+.task.unplanned .title { color: var(--ink, #111); }
 .task.blocked { opacity: 0.7; }
 .task.blocked .title { color: var(--grey-task); font-style: italic; }
 .task .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #111; }
@@ -220,6 +241,32 @@ input, select, textarea { font-family: inherit; }
 .task.drop-bottom { box-shadow: 0 2px 0 0 var(--accent); }
 .task[draggable="true"] { cursor: grab; }
 .task[draggable="true"]:active { cursor: grabbing; }
+
+/* Inline trash icon: by default the same colour as the weekday labels
+   (muted), near-transparent; turns to ink (black) on row hover. */
+.task-trash {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  margin-left: 6px;
+  color: var(--muted);
+  opacity: 0.35;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.task:hover .task-trash,
+.task .task-trash.hover {
+  display: inline-flex;
+  color: var(--ink);
+  opacity: 1;
+}
+.task-trash:hover {
+  color: var(--ink);
+  opacity: 1;
+}
 
 .recur-icon {
   flex-shrink: 0;
@@ -335,12 +382,13 @@ input, select, textarea { font-family: inherit; }
   grid-auto-rows: 1fr;
   gap: 24px 40px;
   width: 100%;
+  height: 100%;
   min-height: 100%;
   padding: 8px 4px 20px;
   align-items: stretch;
 }
 .sphere-block {
-  display: flex; flex-direction: column;
+  display: flex; flex-direction: column; height: 100%;
 }
 .sphere-title {
   font-weight: 800; font-size: 22px;
@@ -395,7 +443,9 @@ input, select, textarea { font-family: inherit; }
 .sphere-tasks {
   padding-top: 0;
   flex: 1;
-  display: flex; flex-direction: column; gap: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
   min-height: calc(var(--line-h) * 3);
   background-image: repeating-linear-gradient(
     to bottom,

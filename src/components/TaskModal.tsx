@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react';
 import type { Task, Recurrence, Priority } from '../types';
 import { store, useTasks, useSpheres } from '../store';
 import { DatePickerModal } from './DatePickerModal';
-import { RecurringDeleteModal } from './RecurringDeleteModal';
 
 const COLORS = ['#0a0a0a', '#e74c3c', '#f39c12', '#f1c40f', '#27ae60', '#3498db', '#9b59b6', '#e91e63'];
 
@@ -30,7 +29,6 @@ export function TaskModal({ initial, editingId, onClose }: Props) {
   const [unplanned, setUnplanned] = useState(initial?.unplanned ?? false);
   const [dependsOnTaskId, setDependsOnTaskId] = useState(initial?.dependsOnTaskId ?? '');
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const [showRecurringDelete, setShowRecurringDelete] = useState(false);
 
   const titleRef = useRef<HTMLInputElement>(null);
   useEffect(() => { titleRef.current?.focus(); }, []);
@@ -42,8 +40,6 @@ export function TaskModal({ initial, editingId, onClose }: Props) {
 
   const save = () => {
     if (!title.trim()) return;
-    // Assigning a concrete date takes the task out of the "ДРУГОЕ" backlog.
-    const isUnplanned = startDate ? false : unplanned;
     const payload = {
       title: title.trim(),
       notes: notes.trim() || undefined,
@@ -54,32 +50,11 @@ export function TaskModal({ initial, editingId, onClose }: Props) {
       reminderDays: reminderDays ? Number(reminderDays) : undefined,
       color: color || undefined,
       priority,
-      unplanned: isUnplanned,
+      unplanned,
       dependsOnTaskId: dependsOnTaskId || undefined,
     };
     if (editingId) store.update(editingId, payload);
     else store.add(payload);
-    onClose();
-  };
-
-  const del = () => {
-    if (!editingId) return;
-    // Recurring tasks get the "which occurrences?" prompt.
-    if (recurrence !== 'none') {
-      setShowRecurringDelete(true);
-      return;
-    }
-    store.remove(editingId);
-    onClose();
-  };
-
-  const handleRecurringDelete = (mode: 'single' | 'following' | 'all') => {
-    if (!editingId) return;
-    const anchorDate = startDate || new Date().toISOString().slice(0, 10);
-    if (mode === 'all') store.remove(editingId);
-    else if (mode === 'single') store.removeOccurrence(editingId, anchorDate);
-    else store.removeThisAndFollowing(editingId, anchorDate);
-    setShowRecurringDelete(false);
     onClose();
   };
 
@@ -92,8 +67,6 @@ export function TaskModal({ initial, editingId, onClose }: Props) {
         onSelect={(start, end) => {
           setStartDate(start);
           setEndDate(end);
-          // Picking a real date removes the backlog flag.
-          if (start) setUnplanned(false);
           setShowDatePicker(false);
         }}
         onClose={() => setShowDatePicker(false)}
@@ -106,9 +79,6 @@ export function TaskModal({ initial, editingId, onClose }: Props) {
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h2>{editingId ? 'Редактировать' : 'Новая задача'}</h2>
-          {editingId && (
-            <button className="btn danger" style={{ fontSize: 14, padding: '4px 8px' }} onClick={del}>×</button>
-          )}
         </div>
 
         <div className="field">
@@ -193,12 +163,9 @@ export function TaskModal({ initial, editingId, onClose }: Props) {
         </div>
 
         <div className="checkbox-row">
-          <input id="unplanned" type="checkbox" checked={startDate ? false : unplanned}
-            disabled={!!startDate}
+          <input id="unplanned" type="checkbox" checked={unplanned}
             onChange={(e) => setUnplanned(e.target.checked)} />
-          <label htmlFor="unplanned" style={startDate ? { opacity: 0.5 } : undefined}>
-            Незапланированная (в бэклог «ДРУГОЕ»)
-          </label>
+          <label htmlFor="unplanned">ДРУГОЕ</label>
         </div>
 
         <div className="modal-actions">
@@ -208,13 +175,6 @@ export function TaskModal({ initial, editingId, onClose }: Props) {
           </div>
         </div>
       </div>
-
-      {showRecurringDelete && (
-        <RecurringDeleteModal
-          onChoice={handleRecurringDelete}
-          onClose={() => setShowRecurringDelete(false)}
-        />
-      )}
     </div>
   );
 }

@@ -18,6 +18,8 @@ export function DayView({ anchor, onEdit }: Props) {
   const [val, setVal] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Day cell: only dated, promoted tasks. Tasks tagged "ДРУГОЕ" (unplanned=true)
+  // with a date range belong to the "ДРУГОЕ" section in WeekView only.
   const dayTasks = sortByPriority(tasks.filter((t) => t.startDate && !t.unplanned && taskOnDate(t, anchor)));
 
   const reorderInDay = (draggedId: string, targetId: string, place: 'above' | 'below') => {
@@ -59,7 +61,7 @@ export function DayView({ anchor, onEdit }: Props) {
       </div>
       <div className="day-list">
         {dayTasks.map((t) => (
-          <TaskItem key={t.id} task={t} date={anchor} onEdit={() => onEdit(t)} onReorder={reorderInDay} />
+          <TaskItem key={t.id} task={t} date={anchor} onEdit={() => onEdit(t, iso)} onReorder={reorderInDay} />
         ))}
         {adding ? (
           <input

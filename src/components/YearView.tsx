@@ -52,7 +52,7 @@ export function YearView({ anchor, onPickDate }: Props) {
                       <div key={`w${k}`} style={{ color: 'var(--muted)', fontSize: 10, textAlign: 'center' }}>{w}</div>
                     ))}
                     {days.map((d) => {
-                      const has = tasks.some((t) => t.startDate && taskOnDate(t, d));
+                      const has = tasks.some((t) => t.startDate && !t.unplanned && taskOnDate(t, d));
                       const cls = [
                         'mini-day',
                         !isSameMonth(d, monthAnchor) && 'other',

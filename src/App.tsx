@@ -7,6 +7,7 @@ import { MonthView } from './components/MonthView';
 import { DayView } from './components/DayView';
 import { YearView } from './components/YearView';
 import { DashboardView } from './components/DashboardView';
+import { store } from './store';
 import { TaskModal } from './components/TaskModal';
 import { SearchModal } from './components/SearchModal';
 
@@ -42,7 +43,7 @@ const ChevronIcon = ({ dir }: { dir: 'left' | 'right' }) => (
 export default function App() {
   const [view, setView] = useState<View>('week');
   const [anchor, setAnchor] = useState(new Date());
-  const [modal, setModal] = useState<{ initial?: Partial<Task>; editingId?: string } | null>(null);
+  const [modal, setModal] = useState<{ initial?: Partial<Task>; editingId?: string; editingDate?: string } | null>(null);
   const [showSearchModal, setShowSearchModal] = useState(false);
 
   const shift = (dir: 1 | -1) => {
@@ -57,7 +58,7 @@ export default function App() {
   const title = (() => {
     switch (view) {
       case 'dashboard': return 'Дашборд';
-      case 'day': return fmt.full(anchor).toUpperCase();
+      case 'day': return fmt.full(anchor);
       case 'week':
       case 'month': return fmt.monthYear(anchor);
       case 'year': return String(anchor.getFullYear());
@@ -66,12 +67,21 @@ export default function App() {
 
   const goToWeek = () => setView('week');
 
-  const openEdit = (t: Task) => {
-    setModal({ initial: t, editingId: t.id });
+  const openEdit = (t: Task, editingDate?: string) => {
+    setModal({ initial: t, editingId: t.id, editingDate });
     setShowSearchModal(false);
   };
 
   const isCalendarView = view !== 'dashboard';
+
+  const clearAll = () => {
+    if (window.confirm('Удалить все задачи? Это действие нельзя отменить.')) {
+      localStorage.removeItem('calendar.tasks.v1');
+      localStorage.removeItem('calendar.spheres.v1');
+      store.clearAll();
+      window.location.reload();
+    }
+  };
 
   return (
     <div className="app">
@@ -89,6 +99,11 @@ export default function App() {
             )}
             {view === 'year' && (
               <h1>{title}</h1>
+            )}
+            {view === 'dashboard' && (
+              <button className="clear-all-btn" title="Удалить все задачи" onClick={clearAll}>
+                🗑
+              </button>
             )}
           </div>
           <div className="header-controls">
@@ -130,6 +145,7 @@ export default function App() {
         <TaskModal
           initial={modal.initial}
           editingId={modal.editingId}
+          selectedDate={modal.editingDate}
           onClose={() => setModal(null)}
         />
       )}

@@ -36,7 +36,7 @@ export function MonthView({ anchor, onEdit, onPickDate }: Props) {
             <div className="month-grid">
               {WEEKDAYS.map((w) => <div key={w} className="month-weekday">{w}</div>)}
               {days.map((d) => {
-                const dayTasks = sortByPriority(tasks.filter((t) => t.startDate && taskOnDate(t, d)));
+                const dayTasks = sortByPriority(tasks.filter((t) => t.startDate && !t.unplanned && taskOnDate(t, d)));
                 const cls = [
                   'month-cell',
                   !isSameMonth(d, m) && 'other-month',

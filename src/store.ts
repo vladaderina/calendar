@@ -7,7 +7,11 @@ const KEY = 'calendar.tasks.v1';
 const SPHERES_KEY = 'calendar.spheres.v1';
 
 function loadTasks(): Task[] {
-  try { return JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { return []; }
+  try {
+    return JSON.parse(localStorage.getItem(KEY) || '[]');
+  } catch {
+    return [];
+  }
 }
 function loadSpheres(): string[] {
   try {
@@ -15,7 +19,9 @@ function loadSpheres(): string[] {
     if (!raw) return [...DEFAULT_SPHERES];
     const arr = JSON.parse(raw);
     return Array.isArray(arr) && arr.length ? arr : [...DEFAULT_SPHERES];
-  } catch { return [...DEFAULT_SPHERES]; }
+  } catch {
+    return [...DEFAULT_SPHERES];
+  }
 }
 
 let tasks: Task[] = loadTasks();
@@ -30,12 +36,15 @@ function emit() {
   listeners.forEach((l) => l());
 }
 
-// Priority weight: high floats to top, low sinks to bottom.
 const PRIORITY_WEIGHT: Record<string, number> = { high: 0, normal: 1, low: 2 };
 
 export const store = {
-  subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l); },
+  subscribe(l: () => void) {
+    listeners.add(l);
+    return () => listeners.delete(l);
+  },
   add(input: Partial<Task> & { title: string }): Task {
+    const priority = input.priority ?? 'low';
     const t: Task = {
       id: uuid(),
       title: input.title,
@@ -46,9 +55,9 @@ export const store = {
       recurrence: input.recurrence ?? 'none',
       reminderDays: input.reminderDays,
       color: input.color,
-      priority: input.priority ?? 'low',
+      priority,
       unplanned: input.unplanned ?? false,
-      order: input.order ?? priorityBaseOrder(input.priority ?? 'low'),
+      order: input.order ?? priorityBaseOrder(priority) + Date.now(),
       completed: false,
       completedDates: input.completedDates,
       excludedDates: input.excludedDates,
@@ -56,7 +65,7 @@ export const store = {
       dependsOnTaskId: input.dependsOnTaskId,
       createdAt: new Date().toISOString(),
     };
-    tasks = [t, ...tasks];
+    tasks = [...tasks, t];
     emit();
     return t;
   },
@@ -64,8 +73,6 @@ export const store = {
     tasks = tasks.map((t) => {
       if (t.id !== id) return t;
       const next = { ...t, ...patch };
-      // When priority changes (and caller didn't set an explicit order),
-      // re-baseline order so the task floats up / sinks down among peers.
       if (patch.priority != null && patch.priority !== t.priority && patch.order == null) {
         next.order = priorityBaseOrder(patch.priority);
       }
@@ -77,7 +84,6 @@ export const store = {
     tasks = tasks.filter((t) => t.id !== id);
     emit();
   },
-  // Delete just one occurrence of a recurring task (adds an exclusion date).
   removeOccurrence(id: string, dateIso: string) {
     tasks = tasks.map((t) =>
       t.id === id
@@ -86,12 +92,10 @@ export const store = {
     );
     emit();
   },
-  // "Эта и все последующие" — cut the series so it ends the day before dateIso.
   removeThisAndFollowing(id: string, dateIso: string) {
     const t = tasks.find((x) => x.id === id);
     if (!t) return;
     const start = t.startDate ?? dateIso;
-    // If the cut is at/before the very first occurrence, drop the whole task.
     if (dateIso <= start) {
       tasks = tasks.filter((x) => x.id !== id);
       emit();
@@ -111,8 +115,6 @@ export const store = {
     tasks = tasks.map((t) => (map.has(t.id) ? { ...t, order: map.get(t.id) } : t));
     emit();
   },
-  // Toggle completion. For a recurring task on a given day, only that day's
-  // occurrence is toggled — the whole series stays active.
   toggleComplete(id: string, dateIso?: string) {
     tasks = tasks.map((t) => {
       if (t.id !== id) return t;
@@ -150,13 +152,15 @@ export const store = {
     tasks = tasks.map((t) => (t.sphere === name ? { ...t, sphere: undefined } : t));
     emit();
   },
+  clearAll() {
+    tasks = [];
+    emit();
+  },
 };
 
-// A high-priority task gets a small order stamp (floats up), a low one a huge
-// stamp (sinks down), so a plain sort-by-order lands it correctly.
 function priorityBaseOrder(priority: string): number {
   const weight = PRIORITY_WEIGHT[priority] ?? 1;
-  return weight * 1e15 + Date.now();
+  return weight * 1e15;
 }
 
 function prevDayIso(iso: string): string {

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { Task } from '../types';
 import { store } from '../store';
+import { RecurringDeleteModal } from './RecurringDeleteModal';
 import { isDoneOn } from '../utils/date';
 
 interface Props {
@@ -8,6 +9,11 @@ interface Props {
   date?: Date;
   blocked?: boolean;
   onEdit?: () => void;
+  /** Show recurrence-confirmation prompt before deleting. Omit to delete
+   *  immediately (used by views that can't pass a selected date). */
+  selectedDate?: string;
+  /** Optional override: receives the event so callers can keep focus. */
+  onMouseEnter?: () => void;
   onReorder?: (draggedId: string, targetId: string, place: 'above' | 'below') => void;
 }
 
@@ -22,11 +28,42 @@ function toHighlight(hex: string): string {
   return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
 }
 
+function dateIso(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// Minimal outline trash icon — just the bin silhouette (no inner lines).
+function TrashIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M3 6h18" />
+      <path d="M5 6l2 15h10l2-15" />
+      <path d="M9 6V4a3 3 0 0 1 3-3h2a3 3 0 0 1 3 3v2" />
+    </svg>
+  );
+}
+
 // Left click = complete / uncomplete. Right click = open editor.
-export function TaskItem({ task, date, blocked, onEdit, onReorder }: Props) {
+// The trash icon (visible on row hover) deletes with a recurrence confirmation.
+export function TaskItem({ task, date, blocked, onEdit, selectedDate, onReorder }: Props) {
   const hl = !!task.color;
   const bg = task.color ? toHighlight(task.color) : undefined;
   const [over, setOver] = useState<null | 'top' | 'bottom'>(null);
+  const [hover, setHover] = useState(false);
+  const [showRecurDelete, setShowRecurDelete] = useState(false);
 
   const done = date ? isDoneOn(task, date) : task.completed;
 
@@ -37,11 +74,29 @@ export function TaskItem({ task, date, blocked, onEdit, onReorder }: Props) {
     task.unplanned && !done && 'unplanned',
     blocked && 'blocked',
     over && `drop-${over}`,
-  ].filter(Boolean).join(' ');
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   const toggle = () => {
     if (date) store.toggleComplete(task.id, dateIso(date));
     else store.toggleComplete(task.id);
+  };
+
+  const deleteSelf = () => {
+    if (task.recurrence !== 'none') {
+      setShowRecurDelete(true);
+      return;
+    }
+    store.remove(task.id);
+  };
+
+  const handleRecurringDelete = (mode: 'single' | 'following' | 'all') => {
+    const anchorDate = (date ? dateIso(date) : null) || selectedDate || new Date().toISOString().slice(0, 10);
+    if (mode === 'all') store.remove(task.id);
+    else if (mode === 'single') store.removeOccurrence(task.id, anchorDate);
+    else store.removeThisAndFollowing(task.id, anchorDate);
+    setShowRecurDelete(false);
   };
 
   // Compute drop location live from the pointer against this element's box,
@@ -55,8 +110,15 @@ export function TaskItem({ task, date, blocked, onEdit, onReorder }: Props) {
     <div
       className={cls}
       style={hl ? ({ ['--hl' as any]: bg } as any) : undefined}
-      onClick={(e) => { e.stopPropagation(); toggle(); }}
-      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onEdit?.(); }}
+      onClick={(e) => {
+        e.stopPropagation();
+        toggle();
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onEdit?.();
+      }}
       draggable
       onDragStart={(e) => {
         e.stopPropagation();
@@ -68,24 +130,17 @@ export function TaskItem({ task, date, blocked, onEdit, onReorder }: Props) {
         if (!onReorder) return;
         e.preventDefault();
       }}
-      onDragOver={(e) => {
-        if (!onReorder) return;
-        e.preventDefault();
-        e.stopPropagation();
-        e.dataTransfer.dropEffect = 'move';
-        const place = locate(e);
-        // A top-priority task is a wall: nothing can be dropped above it.
-        if (place === 'above' && task.priority === 'high') {
-          if (over !== null) setOver(null);
-          return;
-        }
-        const next = place === 'above' ? 'top' : 'bottom';
-        if (over !== next) setOver(next);
+      onMouseEnter={() => {
+        setHover(true);
+        // Notify parent (e.g. cell-body) that a child is hovered, in case it
+        // manages global drag state.
       }}
+      onMouseLeave={() => setHover(false)}
       onDragLeave={(e) => {
         // Only clear when the pointer actually leaves this element's box.
         const r = e.currentTarget.getBoundingClientRect();
-        const x = e.clientX, y = e.clientY;
+        const x = e.clientX,
+          y = e.clientY;
         if (x < r.left || x >= r.right || y < r.top || y >= r.bottom) {
           setOver(null);
         }
@@ -103,16 +158,34 @@ export function TaskItem({ task, date, blocked, onEdit, onReorder }: Props) {
         onReorder(draggedId, task.id, place);
       }}
     >
-      {task.recurrence !== 'none' && <span className="recur-icon" title="повторяется">↻</span>}
+      {task.recurrence !== 'none' && (
+        <span className="recur-icon" title="повторяется">
+          ↻
+        </span>
+      )}
       <span className="title">{task.title}</span>
       {task.priority === 'high' && <span className="meta">!</span>}
+      {/* Trash icon: grey by default, black on row hover. Click opens the
+          recurrence confirmation (or deletes immediately for non-recurring). */}
+      <button
+        type="button"
+        className={`task-trash ${hover ? 'hover' : ''}`}
+        title="Удалить"
+        onClick={(e) => {
+          e.stopPropagation();
+          deleteSelf();
+        }}
+        aria-label="Удалить задачу"
+      >
+        <TrashIcon />
+      </button>
+
+      {showRecurDelete && (
+        <RecurringDeleteModal
+          onChoice={handleRecurringDelete}
+          onClose={() => setShowRecurDelete(false)}
+        />
+      )}
     </div>
   );
-}
-
-function dateIso(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
 }

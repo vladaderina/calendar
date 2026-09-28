@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
 import type { Task } from '../types';
 import { TaskItem } from './TaskItem';
-import { fmt, weekDays, taskOnDate, daysUntil, sortByPriority } from '../utils/date';
+import { fmt, weekDays, taskOnDate, daysUntil, sortByPriority, nextOccurrence } from '../utils/date';
 import { store, useTasks } from '../store';
-import { addDays, parseISO, isSameDay } from 'date-fns';
+import { addDays, differenceInCalendarDays, format, parseISO, isSameDay } from 'date-fns';
 
 interface Props {
   anchor: Date;
@@ -71,10 +71,12 @@ import { useRef } from 'react';
 export function WeekView({ anchor, onEdit, onPickDate }: Props) {
   const tasks = useTasks();
   const days = weekDays(anchor);
-  const weekEnd = addDays(days[0], 6);
   const today = new Date();
   const [adding, setAdding] = useState<string | null>(null);
 
+  // Day-cell tasks: dated tasks that are PROMOTED (unplanned=false), i.e.
+  // scheduled straight onto a day. Tasks still tagged "ДРУГОЕ" (unplanned=true)
+  // with a date range live ONLY in the "ДРУГОЕ" panel below — not here.
   const tasksByDay = useMemo(() => {
     const map = new Map<string, Task[]>();
     for (const d of days) {
@@ -85,20 +87,40 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
     return map;
   }, [tasks, days]);
 
+  // "ДРУГОЕ" backlog:
+  //  (a) no-date tasks written here manually (with or without a sphere), OR
+  //  (b) tasks that HAVE a planned date range but are still tagged "ДРУГОЕ"
+  //      (unplanned=true) — they surface here for the week their range starts
+  //      instead of in the day cells, until the user drops them onto a day.
+  // Tasks that are dated AND promoted (unplanned=false) belong in day cells.
   const otherTasks = useMemo(() => sortByPriority(tasks.filter((t) => {
-    if (t.completed) return false;
-    if (!t.unplanned) return false;
-    if (!t.startDate) return true;
-    const d = parseISO(t.startDate);
-    return d >= days[0] && d <= weekEnd;
-  })), [tasks, days, weekEnd]);
+    // "ДРУГОЕ":
+    //  - no-date tasks written here manually WITHOUT a category, OR
+    //  - dated tasks kept in the backlog (unplanned=true) instead of day cells.
+    // Tasks WITHOUT a date that DO have a category belong on the dashboard.
+    if (t.startDate && !t.unplanned) return false; // scheduled → day cells
+    if (!t.startDate && t.sphere) return false;    // categorized backlog → dashboard
+    // Dated-but-backlog task: show HERE only while its range overlaps the
+    // current week (also shown on its day-cells). Outside the range window it
+    // disappears from both views.
+    if (t.startDate && t.unplanned) return days.some((d) => taskOnDate(t, d));
+    return true;
+  })), [tasks, days]);
 
-  const soonTasks = useMemo(() => tasks
-    .filter((t) => !t.completed && t.startDate && t.reminderDays != null)
-    .map((t) => ({ t, days: daysUntil(t.startDate!) }))
-    .filter(({ t, days }) => days >= 0 && days <= (t.reminderDays ?? 0))
-    .sort((a, b) => a.days - b.days),
-    [tasks]);
+  // СКОРО: upcoming dated tasks that are PROMOTED (out of the ДРУГОЕ backlog)
+  // and not yet completed. Tasks still tagged "ДРУГОЕ" (unplanned) are shown
+  // only in the ДРУГОЕ panel, not here.
+  const soonTasks = useMemo(() => {
+    return tasks
+      .filter((t) => !t.completed && t.startDate && !t.unplanned && t.reminderDays != null)
+      .map((t) => {
+        const occ = nextOccurrence(t);
+        if (!occ) return null;
+        return { t, days: daysUntil(occ) };
+      })
+      .filter((r): r is { t: Task; days: number } => r !== null && r.days >= 0 && r.days <= (r.t.reminderDays ?? 0))
+      .sort((a, b) => a.days - b.days);
+  }, [tasks]);
 
   // Reorder within a day. If the dragged task lives in another day (or the
   // backlog), first re-date it to THIS day, then position it among peers.
@@ -141,7 +163,34 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
           onDrop={(e) => {
             e.preventDefault();
             const id = e.dataTransfer.getData('text/task-id');
-            if (id) store.update(id, { startDate: iso, endDate: iso, unplanned: false });
+            if (!id) return;
+            const t = tasks.find((x) => x.id === id);
+            if (!t) return;
+            if (t.unplanned && t.startDate) {
+              // Dated "ДРУГОЕ" task: promote it out of the backlog and
+              // collapse its planned range onto this single dropped day.
+              store.update(id, { startDate: iso, endDate: iso, unplanned: false });
+            } else if (t.unplanned) {
+              // Pure backlog task: snap it onto this day.
+              store.update(id, { startDate: iso, endDate: iso, unplanned: false });
+            } else if (!t.startDate) {
+              // No date at all: assign this day.
+              store.update(id, { startDate: iso, endDate: iso });
+            } else {
+              // Already dated & promoted: move it to the dropped day.
+              // - single-day task (startDate == endDate): snap to the new day.
+              // - ranged task: preserve the span length, re-based at the
+              //   dropped day (e.g. Mon–Wed dropped on Fri → Fri–Sun).
+              const t0 = parseISO(t.startDate);
+              const n0 = parseISO(t.endDate ?? t.startDate);
+              const spanDays = differenceInCalendarDays(n0, t0);
+              const newStart = parseISO(iso);
+              const newEnd = addDays(newStart, spanDays);
+              store.update(id, {
+                startDate: format(newStart, 'yyyy-MM-dd'),
+                endDate: format(newEnd, 'yyyy-MM-dd'),
+              });
+            }
           }}
         >
           {dayTasks.map((t) => (
@@ -150,7 +199,7 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
               task={t}
               date={d}
               blocked={isBlocked(t, tasks)}
-              onEdit={() => onEdit(t)}
+              onEdit={() => onEdit(t, fmt.iso(d))}
               onReorder={reorderInDay(iso, dayTasks)}
             />
           ))}
@@ -168,8 +217,14 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
 
   return (
     <div className="week-grid">
-      {/* Second row: backlog (left), soon, then Sat, Sun (right) */}
-      <div className="week-row">
+      {/* First row: Mon–Fri */}
+      <div className="week-row">{workdays.map(renderDayCell)}</div>
+
+      {/* Bottom row: Sat, Sun (left); backlog + soon (right) */}
+      <div className="week-row bottom-row">
+        {renderDayCell(sat)}
+        {renderDayCell(sun)}
+
         <div className="cell">
           <div className="cell-header">
             <span className="cell-title muted">ДРУГОЕ</span>
@@ -181,12 +236,15 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
             onDrop={(e) => {
               e.preventDefault();
               const id = e.dataTransfer.getData('text/task-id');
-              // Dropping into "ДРУГОЕ" turns the task into an unplanned backlog item.
-              if (id) store.update(id, { unplanned: true, startDate: undefined, endDate: undefined });
+              // Dropping into "ДРУГОЕ" tags the task as backlog (unplanned=true).
+              // The date range (if any) is preserved so the task surfaces in
+              // "ДРУГОЕ" for the week its range starts. Dragged onto a day-cell
+              // it is promoted out of ДРУГОЕ (unplanned=false).
+              if (id) store.update(id, { unplanned: true, sphere: undefined });
             }}
           >
             {otherTasks.map((t) => (
-              <TaskItem key={t.id} task={t} blocked={isBlocked(t, tasks)} onEdit={() => onEdit(t)} />
+              <TaskItem key={t.id} task={t} blocked={isBlocked(t, tasks)} onEdit={() => onEdit(t, t.startDate)} />
             ))}
             {adding === OTHER
               ? <QuickAdd defaults={{ unplanned: true }} onDone={() => setAdding(null)} />
@@ -210,14 +268,6 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
             )}
           </div>
         </div>
-
-        {renderDayCell(sat)}
-        {renderDayCell(sun)}
-      </div>
-
-      {/* First row: Пн–Пт */}
-      <div className="week-row">
-        {workdays.map(renderDayCell)}
       </div>
     </div>
   );

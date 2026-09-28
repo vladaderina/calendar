@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { Task } from '../types';
 import { TaskItem } from './TaskItem';
 import { store, useTasks, useSpheres } from '../store';
@@ -20,7 +20,8 @@ function QuickAdd({ sphere, onDone }: { sphere: string; onDone: () => void }) {
   const submit = () => {
     const t = val.trim();
     if (t) {
-      store.add({ title: t, sphere });
+      // New card from the dashboard is a backlog item: no date, unplanned.
+      store.add({ title: t, sphere, unplanned: true });
       setVal('');
       inputRef.current?.focus();
     } else {
@@ -57,8 +58,6 @@ function QuickAdd({ sphere, onDone }: { sphere: string; onDone: () => void }) {
   );
 }
 
-import { useRef } from 'react';
-
 function EditableName({ value, onChange, onDelete }: { value: string; onChange: (v: string) => void; onDelete: () => void }) {
   return (
     <div className="sphere-title-inner">
@@ -78,7 +77,7 @@ function EditableName({ value, onChange, onDelete }: { value: string; onChange: 
   );
 }
 
-export function DashboardView({ onEdit }: Props) {
+export function DashboardView({ onEdit, onClearAll }: Props) {
   const tasks = useTasks();
   const spheres = useSpheres();
   const [addingIn, setAddingIn] = useState<string | null>(null);
@@ -86,12 +85,13 @@ export function DashboardView({ onEdit }: Props) {
   const [newSphere, setNewSphere] = useState('');
   const [creating, setCreating] = useState(false);
 
-  // Unplanned (backlog) tasks: show them, including completed (just dimmed, not deleted).
+  // Backlog = tasks with no concrete date. Completed ones stay visible (dimmed).
+  // Dashboard (backlog by category): tasks with a known sphere and no date.
   const bySphere = new Map<string, Task[]>();
   for (const s of spheres) bySphere.set(s, []);
   for (const t of tasks) {
-    if (!t.unplanned) continue;
-    if (!t.sphere || !bySphere.has(t.sphere)) continue;
+    if (t.startDate) continue;
+    if (!t.sphere || !spheres.includes(t.sphere)) continue;
     bySphere.get(t.sphere)!.push(t);
   }
 
@@ -122,7 +122,17 @@ export function DashboardView({ onEdit }: Props) {
                 </div>
               )}
             </div>
-            <div className="sphere-tasks">
+            <div
+              className="sphere-tasks"
+              onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+              onDrop={(e) => {
+                e.preventDefault();
+                const id = e.dataTransfer.getData('text/task-id');
+                // Dropping a backlog task onto a category assigns it to that
+                // sphere and promotes it out of the "ДРУГОЕ" backlog.
+                if (id) store.update(id, { sphere: s, unplanned: false });
+              }}
+            >
               {list.map((t) => (
                 <TaskItem key={t.id} task={t} blocked={isBlocked(t, tasks)} onEdit={() => onEdit(t)} />
               ))}
