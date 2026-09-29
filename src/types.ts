@@ -3,7 +3,7 @@ export type Sphere = string;
 export const DEFAULT_SPHERES: string[] = [
   'ИЗУЧЕНИЕ', 'ТВОРЧЕСТВО', 'ОТДЫХ/РАЗВЛЕЧЕНИЯ', 'ДУХОВНОСТЬ',
   'ПУТЕШЕСТВИЯ', 'ОТНОШЕНИЯ', 'ЗДОРОВЬЕ', 'КАРЬЕРА',
-  'ЦИФРА', 'КОНТЕНТ', 'БЫТ', 'СОЦИУМ',
+  'ЦИФРА', 'КОНТЕНТ', 'БЫТ', 'СОЦИУМ', 'РАЗНОЕ',
 ];
 
 export type Recurrence = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly';

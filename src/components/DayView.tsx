@@ -7,7 +7,7 @@ import { isSameDay } from 'date-fns';
 
 interface Props {
   anchor: Date;
-  onEdit: (task: Task) => void;
+  onEdit: (task: Task, editingDate?: string) => void;
 }
 
 export function DayView({ anchor, onEdit }: Props) {

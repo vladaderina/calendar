@@ -10,6 +10,7 @@ import { DashboardView } from './components/DashboardView';
 import { store } from './store';
 import { TaskModal } from './components/TaskModal';
 import { SearchModal } from './components/SearchModal';
+import { ChevronIcon } from './icons/ChevronIcon';
 
 // Inline SVG icons for the top nav.
 const DashboardIcon = () => (
@@ -33,12 +34,7 @@ const SearchIcon = () => (
     <path d="M21 21l-4.3-4.3" />
   </svg>
 );
-// Bigger, bolder chevrons for the nav arrows.
-const ChevronIcon = ({ dir }: { dir: 'left' | 'right' }) => (
-  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    {dir === 'left' ? <path d="M15 5l-7 7 7 7" /> : <path d="M9 5l7 7-7 7" />}
-  </svg>
-);
+// Bigger, bolder chevrons for the nav arrows (imported from ./icons/ChevronIcon).
 
 export default function App() {
   const [view, setView] = useState<View>('week');
@@ -136,8 +132,8 @@ export default function App() {
           {view === 'dashboard' && <DashboardView onEdit={openEdit} />}
           {view === 'day' && <DayView anchor={anchor} onEdit={openEdit} />}
           {view === 'week' && <WeekView anchor={anchor} onEdit={openEdit} onPickDate={(d) => { setAnchor(d); setView('day'); }} />}
-          {view === 'month' && <MonthView key={fmt.iso(anchor)} anchor={anchor} onEdit={openEdit} onPickDate={(d) => { setAnchor(d); setView('day'); }} />}
-          {view === 'year' && <YearView key={fmt.iso(anchor)} anchor={anchor} onPickDate={(d) => { setAnchor(d); setView('day'); }} />}
+          {view === 'month' && <MonthView key={fmt.iso(anchor)} anchor={anchor} onEdit={openEdit} onPickDate={(d) => { setAnchor(d); setView('day'); }} onZoomOut={() => setView('year')} />}
+          {view === 'year' && <YearView key={fmt.iso(anchor)} anchor={anchor} onPickDate={(d) => { setAnchor(d); setView('day'); }} onZoomIn={() => setView('month')} />}
         </div>
       </div>
 

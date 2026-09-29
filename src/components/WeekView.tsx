@@ -7,7 +7,7 @@ import { addDays, differenceInCalendarDays, format, parseISO, isSameDay } from '
 
 interface Props {
   anchor: Date;
-  onEdit: (task: Task) => void;
+  onEdit: (task: Task, editingDate?: string) => void;
   onPickDate?: (date: Date) => void;
 }
 
@@ -227,7 +227,7 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
 
         <div className="cell">
           <div className="cell-header">
-            <span className="cell-title muted">ДРУГОЕ</span>
+            <span className="cell-title muted">БЭКЛОГ</span>
           </div>
           <div
             className="cell-body"

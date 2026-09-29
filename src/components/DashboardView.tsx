@@ -77,7 +77,7 @@ function EditableName({ value, onChange, onDelete }: { value: string; onChange: 
   );
 }
 
-export function DashboardView({ onEdit, onClearAll }: Props) {
+export function DashboardView({ onEdit }: Props) {
   const tasks = useTasks();
   const spheres = useSpheres();
   const [addingIn, setAddingIn] = useState<string | null>(null);

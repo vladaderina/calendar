@@ -20,6 +20,11 @@ export const fmt = {
   },
   monthOnly: (d: Date) => format(d, 'LLLL', { locale: ru }).toUpperCase(),
   full: (d: Date) => format(d, 'd MMMM yyyy', { locale: ru }),
+  // "Вт, 22 сент. 2026" — compact date with weekday, for the task modal header.
+  dayFull: (d: Date) => {
+    const s = format(d, 'EEEEEE, d MMM yyyy', { locale: ru });
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  },
 };
 
 export function weekDays(anchor: Date): Date[] {
@@ -94,7 +99,6 @@ export function daysUntil(iso: string): number {
 export function nextOccurrence(t: Task): string | null {
   if (!t.startDate) return null;
   const today = startOfDay(new Date());
-  const start = startOfDay(parseISO(t.startDate));
   let cursor = today;
   // Walk forward day by day; most series have frequent enough occurrences
   // (daily/weekly/monthly) that this is bounded and cheap.
