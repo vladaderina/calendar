@@ -1,18 +1,21 @@
 import { createClient, type SupabaseClient, type User } from '@supabase/supabase-js';
-import type { Task } from '../types';
+import type { Task, Weekday } from '../types';
 
+// Vite's `define` option in vite.config.ts replaces __SUPABASE_URL__ and
+// __SUPABASE_ANON_KEY__ at build time with values from .env.
+// The typeof guard handles both the Vite replacement and the runtime case.
 declare const __SUPABASE_URL__: string | undefined;
 declare const __SUPABASE_ANON_KEY__: string | undefined;
 
-const url = typeof __SUPABASE_URL__ !== 'undefined' ? __SUPABASE_URL__ : (import.meta as any)?.env?.VITE_SUPABASE_URL;
-const anonKey = typeof __SUPABASE_ANON_KEY__ !== 'undefined' ? __SUPABASE_ANON_KEY__ : (import.meta as any)?.env?.VITE_SUPABASE_ANON_KEY;
+const url = typeof __SUPABASE_URL__ !== 'undefined' ? __SUPABASE_URL__ : '';
+const anonKey = typeof __SUPABASE_ANON_KEY__ !== 'undefined' ? __SUPABASE_ANON_KEY__ : '';
 
 // Supabase is used only when the project is configured (.env filled).
 // Otherwise the app falls back to localStorage (existing behaviour).
 export const isSupabaseAvailable = Boolean(url && anonKey);
 
 export const supabase: SupabaseClient | null = isSupabaseAvailable
-  ? createClient(url, anonKey)
+  ? createClient(url!, anonKey!)
   : null;
 
 // Convert a local Task to the DB-shaped row and back, keeping field name
@@ -27,6 +30,8 @@ type TaskRow = {
   end_date?: string;
   sphere?: string;
   recurrence: string;
+  recurrence_days?: number[];
+  year_dates?: string[];
   reminder_days?: number;
   color?: string;
   priority: string;
@@ -37,7 +42,8 @@ type TaskRow = {
   completed_dates?: string[];
   excluded_dates?: string[];
   recurrence_until?: string;
-  depends_on_task_id?: string;
+  subtask_ids?: string[];
+  subtask_of?: string;
   created_at: string;
 };
 
@@ -51,6 +57,8 @@ export function toTaskRow(t: Task, userId: string): TaskRow {
     end_date: t.endDate,
     sphere: t.sphere,
     recurrence: t.recurrence,
+    recurrence_days: t.recurrenceDays,
+    year_dates: t.yearDates,
     reminder_days: t.reminderDays,
     color: t.color,
     priority: t.priority,
@@ -61,7 +69,8 @@ export function toTaskRow(t: Task, userId: string): TaskRow {
     completed_dates: t.completedDates,
     excluded_dates: t.excludedDates,
     recurrence_until: t.recurrenceUntil,
-    depends_on_task_id: t.dependsOnTaskId,
+    subtask_ids: t.subtaskIds,
+    subtask_of: t.subtaskOf,
     created_at: t.createdAt,
   };
 }
@@ -75,6 +84,8 @@ export function fromTaskRow(r: TaskRow): Task {
     endDate: r.end_date,
     sphere: r.sphere,
     recurrence: (r.recurrence ?? 'none') as Task['recurrence'],
+    recurrenceDays: (r.recurrence_days ?? []) as Weekday[],
+    yearDates: r.year_dates,
     reminderDays: r.reminder_days,
     color: r.color,
     priority: (r.priority ?? 'low') as Task['priority'],
@@ -85,7 +96,8 @@ export function fromTaskRow(r: TaskRow): Task {
     completedDates: r.completed_dates,
     excludedDates: r.excluded_dates,
     recurrenceUntil: r.recurrence_until,
-    dependsOnTaskId: r.depends_on_task_id,
+    subtaskIds: r.subtask_ids,
+    subtaskOf: r.subtask_of,
     createdAt: r.created_at ?? new Date().toISOString(),
   };
 }

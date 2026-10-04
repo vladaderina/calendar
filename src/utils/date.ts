@@ -63,6 +63,17 @@ export function taskOnDate(t: Task, date: Date): boolean {
     case 'weekly': return d.getDay() === start.getDay();
     case 'monthly': return d.getDate() === start.getDate();
     case 'yearly': return d.getDate() === start.getDate() && d.getMonth() === start.getMonth();
+    case 'weekdays': {
+      if (!t.recurrenceDays || t.recurrenceDays.length === 0) return false;
+      // JS getDay(): 0 (Sun) … 6 (Sat). Our Weekday: 1 (Mon) … 7 (Sun).
+      const jsDay = d.getDay();
+      const weekday = jsDay === 0 ? 7 : jsDay;
+      return t.recurrenceDays.includes(weekday as any);
+    }
+    case 'yearDays': {
+      if (!t.yearDates) return false;
+      return t.yearDates.includes(iso);
+    }
   }
   return false;
 }
@@ -117,3 +128,35 @@ export function nextOccurrence(t: Task): string | null {
 }
 
 export { addDays, addMonths, addWeeks, addYears, isSameDay, parseISO };
+
+// --- Production calendar (Russian holidays / weekends) ---
+// Fixed-date public holidays of Russia (month is 0-based in JS Date).
+const FIXED_HOLIDAYS: ReadonlyArray<[number, number]> = [
+  [0, 1],   // 1 Jan — New Year
+  [0, 2],   // 2 Jan — New Year holidays
+  [0, 3],   // 3 Jan — New Year holidays
+  [0, 4],   // 4 Jan — New Year holidays
+  [0, 5],   // 5 Jan — New Year holidays
+  [0, 6],   // 6 Jan — New Year holidays
+  [0, 7],   // 7 Jan — Christmas (Jan 7)
+  [1, 22],  // 23 Feb — Defender of the Fatherland Day
+  [2, 7],   // 8 Mar — International Women's Day
+  [4, 1],   // 1 May — Spring and Labour Day
+  [4, 8],   // 9 May — Victory Day
+  [5, 11],  // 12 Jun — Russia Day
+  [10, 4],  // 4 Nov — Unity Day (День народного единства)
+  [10, 7],  // 7 Nov — October Revolution anniversary
+];
+
+// Returns true for weekends (Sat/Sun) and fixed public holidays.
+export function isNonWorkingDay(d: Date): boolean {
+  const day = d.getDay(); // 0 = Sun, 6 = Sat
+  if (day === 0 || day === 6) return true;
+  const idx = FIXED_HOLIDAYS.findIndex(([m, dayNum]) => m === d.getMonth() && dayNum === d.getDate());
+  return idx >= 0;
+}
+
+// True only for official fixed public holidays (not weekends).
+export function isHoliday(d: Date): boolean {
+  return FIXED_HOLIDAYS.some(([m, dayNum]) => m === d.getMonth() && dayNum === d.getDate());
+}

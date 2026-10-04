@@ -1,21 +1,22 @@
 import { useState, useEffect, useRef } from 'react';
-import type { Task, Recurrence, Priority, Sphere } from '../types';
-import { store, useTasks, useSpheres } from '../store';
+import type { Task, Recurrence, Priority, Sphere, Weekday } from '../types';
+import { store, useSpheres } from '../store';
 import { DatePickerModal } from './DatePickerModal';
 import { fmt } from '../utils/date';
 import { parseISO } from 'date-fns';
-
-const COLORS = ['#0a0a0a', '#e74c3c', '#f39c12', '#f1c40f', '#27ae60', '#3498db', '#9b59b6', '#e91e63'];
+import { getColors, renameColor, NO_COLOR } from '../config/colors';
 
 const PRIORITY_ORDER: Priority[] = ['low', 'normal', 'high'];
 const PRIORITY_LABEL: Record<Priority, string> = { low: 'низкий', normal: 'обычный', high: 'высокий' };
-const RECURRENCE_ORDER: Recurrence[] = ['none', 'daily', 'weekly', 'monthly', 'yearly'];
+const RECURRENCE_ORDER: Recurrence[] = ['none', 'daily', 'weekly', 'monthly', 'yearly', 'weekdays', 'yearDays'];
 const RECURRENCE_LABEL: Record<Recurrence, string> = {
   none: 'не повторять',
   daily: 'ежедневно',
   weekly: 'еженедельно',
   monthly: 'ежемесячно',
   yearly: 'ежегодно',
+  weekdays: 'по дням недели',
+  yearDays: 'в конкретные даты',
 };
 const REMINDER_OPTIONS: { value: number | null; label: string }[] = [
   { value: null, label: 'не напоминать' },
@@ -64,6 +65,7 @@ const PriorityBars = ({ level, filled }: { level?: Priority; filled?: boolean })
   );
 };
 const Check = () => <span className="check">✓</span>;
+const WEEKDAYS: string[] = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 
 interface Props {
   initial?: Partial<Task>;
@@ -72,8 +74,13 @@ interface Props {
   onClose: () => void;
 }
 
+// Store subtask as { id, title }
+interface Subtask {
+  id: string;
+  title: string;
+}
+
 export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) {
-  const allTasks = useTasks();
   const spheres = useSpheres();
 
   const [title, setTitle] = useState(initial?.title ?? '');
@@ -82,17 +89,47 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
   const [endDate, setEndDate] = useState(initial?.endDate ?? selectedDate ?? '');
   const [sphere, setSphere] = useState<Sphere>(initial?.sphere ?? '');
   const [recurrence, setRecurrence] = useState<Recurrence>(initial?.recurrence ?? 'none');
+  const [recurrenceDays, setRecurrenceDays] = useState<Weekday[]>(initial?.recurrenceDays ?? []);
+  const [yearDates, setYearDates] = useState<string[]>(initial?.yearDates ?? []);
   const [reminderDays, setReminderDays] = useState<number | null>(initial?.reminderDays ?? null);
   const [color, setColor] = useState(initial?.color ?? '');
   const [priority, setPriority] = useState<Priority>(initial?.priority ?? 'normal');
   const [unplanned, setUnplanned] = useState(initial?.unplanned ?? false);
-  const [dependsOnTaskId, setDependsOnTaskId] = useState(initial?.dependsOnTaskId ?? '');
+  
+  // Store subtasks as objects with id and title
+  const initSubtasks = (): Subtask[] => {
+    if (editingId) {
+      const parent = store.getById(editingId);
+      if (parent?.subtaskIds) {
+        return parent.subtaskIds
+          .map((id) => {
+            const sub = store.getById(id);
+            return sub ? { id, title: sub.title } : null;
+          })
+          .filter((s): s is Subtask => s !== null);
+      }
+    }
+    return [];
+  };
+  
+  const [subtasks, setSubtasks] = useState<Subtask[]>(initSubtasks);
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showYearPicker, setShowYearPicker] = useState(false);
   const [open, setOpen] = useState<Popover>(null);
   const [newSphere, setNewSphere] = useState('');
+  const [, setColorRefresh] = useState(0);
+  const [editingLabel, setEditingLabel] = useState<string | null>(null);
+  const labelInputRef = useRef<HTMLInputElement>(null);
+  const newSubtaskRef = useRef<HTMLInputElement>(null);
+  const toolsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const h = () => setColorRefresh((n) => n + 1);
+    window.addEventListener('colors-change', h);
+    return () => window.removeEventListener('colors-change', h);
+  }, []);
 
   const titleRef = useRef<HTMLInputElement>(null);
-  const toolsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { titleRef.current?.focus(); }, []);
 
@@ -101,7 +138,7 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (open) setOpen(null);
-      else if (!showDatePicker) onClose();
+      else if (!showDatePicker && !showYearPicker) onClose();
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
@@ -119,23 +156,54 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
 
   const toggle = (p: Exclude<Popover, null>) => setOpen((cur) => (cur === p ? null : p));
 
+  // Check if this is creating a new task or editing existing
+  const isEditing = !!editingId;
+
   const save = () => {
     if (!title.trim()) return;
     const payload = {
       title: title.trim(),
       notes: notes.trim() || undefined,
       startDate: startDate || undefined,
-      endDate: endDate || startDate || undefined,
+      endDate: endDate && endDate !== startDate ? endDate : undefined,
       sphere: sphere || undefined,
       recurrence,
+      recurrenceDays: recurrence === 'weekdays' ? recurrenceDays : undefined,
+      yearDates: recurrence === 'yearDays' ? yearDates : undefined,
       reminderDays: reminderDays ?? undefined,
       color: color || undefined,
       priority,
       unplanned,
-      dependsOnTaskId: dependsOnTaskId || undefined,
     };
-    if (editingId) store.update(editingId, payload);
-    else store.add(payload);
+    if (isEditing) {
+      store.update(editingId, payload);
+      const parent = store.getById(editingId);
+      
+      // Handle deleted subtasks
+      const currentSubtaskIds = new Set(subtasks.map((s) => s.id));
+      const existingSubtaskIds = new Set(parent?.subtaskIds ?? []);
+      const deletedIds = [...existingSubtaskIds].filter((id) => !currentSubtaskIds.has(id));
+      deletedIds.forEach((id) => store.removeSubtask(editingId!, id));
+      
+      // Propagate parent dates to existing subtasks
+      const today = new Date().toISOString().slice(0, 10);
+      const parentEnd = parent?.endDate ?? parent?.startDate ?? '';
+      subtasks.forEach((s) => {
+        store.update(s.id, {
+          startDate: today,
+          endDate: parentEnd,
+          unplanned: true,
+        });
+      });
+      
+      // Create only NEW subtasks
+      const newTitles = subtasks.filter((s) => !existingSubtaskIds.has(s.id)).map((s) => s.title);
+      if (newTitles.length) store.addSubtasks(editingId!, newTitles);
+    } else {
+      const parent = store.add(payload);
+      const titles = subtasks.map((s) => s.title);
+      if (titles.length) store.addSubtasks(parent.id, titles);
+    }
     onClose();
   };
 
@@ -145,12 +213,36 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
     setShowDatePicker(false);
   };
 
+  const onPickYearDate = (start: string) => {
+    // Toggle individual date: select if not present, deselect if present.
+    // Called on every day click in singleDate mode (multi-select toggle).
+    if (!yearDates.includes(start)) {
+      setYearDates([...yearDates, start].sort());
+    } else {
+      setYearDates(yearDates.filter((d) => d !== start));
+    }
+    if (recurrence !== 'yearDays') setRecurrence('yearDays');
+  };
+
   const dateLabel = (() => {
     if (!startDate) return 'Выбрать дату...';
     const s = parseISO(startDate);
     if (endDate && endDate !== startDate) return `${fmt.dayShort(s)} — ${fmt.dayShort(parseISO(endDate))}`;
     return fmt.dayFull(s);
   })();
+
+  if (showYearPicker) {
+    return (
+      <DatePickerModal
+        anchor={startDate ? parseISO(startDate) : new Date()}
+        currentStart={yearDates.length > 0 ? yearDates[yearDates.length - 1] : undefined}
+        onSelect={onPickYearDate}
+        onClose={() => { setShowYearPicker(false); setOpen('recurrence'); }}
+        singleDate
+        selectedDates={yearDates}
+      />
+    );
+  }
 
   if (showDatePicker) {
     return (
@@ -163,6 +255,11 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
       />
     );
   }
+
+  // Handle removing a subtask from local state
+  const handleRemoveSubtask = (idx: number) => {
+    setSubtasks(subtasks.filter((_, i) => i !== idx));
+  };
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -199,9 +296,7 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
                   <div className="pop-sep" />
                   {spheres.map((s) => (
                     <button key={s} className={`pop-item ${sphere === s ? 'selected' : ''}`}
-                      onClick={() => { setSphere(s); setOpen(null); }}>
-                      <span>{s}</span>{sphere === s && <Check />}
-                    </button>
+                      onClick={() => { setSphere(s); setOpen(null); }}><span>{s}</span>{sphere === s && <Check />}</button>
                   ))}
                   <div className="pop-sep" />
                   <div className="pop-input-row">
@@ -245,9 +340,8 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
                   {REMINDER_OPTIONS.map((o) => (
                     <button key={String(o.value)}
                       className={`pop-item ${reminderDays === o.value ? 'selected' : ''}`}
-                      onClick={() => { setReminderDays(o.value); setOpen(null); }}>
-                      <span>{o.label}</span>{reminderDays === o.value && <Check />}
-                    </button>
+                      onClick={() => { setReminderDays(o.value); setOpen(null); }}
+                    ><span>{o.label}</span>{reminderDays === o.value && <Check />}</button>
                   ))}
                   <div className="pop-sep" />
                   <div className="pop-input-row">
@@ -270,13 +364,53 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
                 <RepeatIcon />
               </button>
               {open === 'recurrence' && (
-                <div className="popover">
+                <div className="popover pop-recurrence">
                   <div className="pop-title">Повтор</div>
                   {RECURRENCE_ORDER.map((r) => (
-                    <button key={r} className={`pop-item ${recurrence === r ? 'selected' : ''}`}
-                      onClick={() => { setRecurrence(r); setOpen(null); }}>
-                      <span>{RECURRENCE_LABEL[r]}</span>{recurrence === r && <Check />}
-                    </button>
+                    <div key={r}>
+                      <button className={`pop-item ${recurrence === r ? 'selected' : ''}`}
+                        onClick={() => {
+                          setRecurrence(r);
+                          if (r !== 'weekdays') setRecurrenceDays([]);
+                          if (r !== 'yearDays') setYearDates([]);
+                          if (r === 'weekdays' || r === 'yearDays') setOpen('recurrence');
+                          else setOpen(null);
+                        }}
+                      >
+                        <span>{RECURRENCE_LABEL[r]}</span>{recurrence === r && <Check />}
+                      </button>
+                      {r === 'weekdays' && (
+                        <div className="weekday-picker">
+                          {WEEKDAYS.map((label, i) => {
+                            const day = (i + 1) as Weekday;
+                            const on = recurrenceDays.includes(day);
+                            return (
+                              <button key={day}
+                                className={`weekday-swatch ${on ? 'on' : ''}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (recurrence !== 'weekdays') setRecurrence('weekdays');
+                                  setRecurrenceDays(on
+                                    ? recurrenceDays.filter((d) => d !== day)
+                                    : [...recurrenceDays, day].sort((a, b) => a - b));
+                                }}
+                                title={label} aria-label={label}>{label}</button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {r === 'yearDays' && (
+                        <div className="year-date-picker">
+                          {yearDates.length === 0 ? (
+                            <button className="pop-item" onClick={(e) => { e.stopPropagation(); setShowYearPicker(true); }}><span>+ дата</span></button>
+                          ) : yearDates.map((d, idx) => (
+                            <button key={idx} className="pop-item"
+                              onClick={(e) => { e.stopPropagation(); setYearDates(yearDates.filter((_, i) => i !== idx)); }}
+                            ><span>{d}</span><span style={{ color: 'var(--muted)', marginLeft: 8 }}>✕</span></button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   ))}
                 </div>
               )}
@@ -297,12 +431,7 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
                   <div className="pop-title">Приоритет</div>
                   {PRIORITY_ORDER.map((p) => (
                     <button key={p} className={`pop-item ${priority === p ? 'selected' : ''}`}
-                      onClick={() => { setPriority(p); setOpen(null); }}>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <PriorityBars level={p} />{PRIORITY_LABEL[p]}
-                      </span>
-                      {priority === p && <Check />}
-                    </button>
+                      onClick={() => { setPriority(p); setOpen(null); }}><span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><PriorityBars level={p} />{PRIORITY_LABEL[p]}</span>{priority === p && <Check />}</button>
                   ))}
                 </div>
               )}
@@ -315,20 +444,57 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
                   style={color ? { background: color, borderColor: color } : undefined} />
               </button>
               {open === 'color' && (
-                <div className="popover">
-                  <div className="pop-title">Цвет</div>
-                  <div className="color-grid">
-                    <div
-                      className={`color-swatch none ${!color ? 'selected' : ''}`}
-                      onClick={() => { setColor(''); setOpen(null); }}
-                    />
-                    {COLORS.map((c) => (
-                      <div key={c}
-                        className={`color-swatch ${color === c ? 'selected' : ''}`}
-                        style={{ background: c }}
-                        onClick={() => { setColor(c); setOpen(null); }} />
-                    ))}
-                  </div>
+                <div className="popover pop-color">
+                  <div className="pop-title">Цвет задачи</div>
+                  <div
+                    className={`color-swatch none ${!color ? 'selected' : ''}`}
+                    onClick={() => { setColor(''); setOpen(null); }}
+                    title={NO_COLOR.label}
+                  />
+                  <div className="pop-sep" />
+                  {getColors().map((c) => (
+                    <div key={c.value} className="color-row">
+                      <button
+                        className={`color-swatch-btn ${color === c.value ? 'selected' : ''}`}
+                        onClick={() => {
+                          const isUnnamed = !c.label || c.unnamed;
+                          if (!isUnnamed) { setColor(c.value); setOpen(null); }
+                          else setEditingLabel(c.value);
+                        }}
+                        title={c.label || 'Нажмите чтобы задать имя'}
+                        style={{
+                          background: c.value,
+                          borderColor: color === c.value ? 'var(--ink)' : (!c.label || c.unnamed) ? 'var(--muted)' : 'transparent',
+                          opacity: (!c.label || c.unnamed) ? 0.5 : 1,
+                        }}
+                      >
+                        {color === c.value && <span className="color-check">✓</span>}
+                      </button>
+                      {editingLabel === c.value ? (
+                        <input
+                          ref={labelInputRef}
+                          className="color-label-edit"
+                          defaultValue={c.label}
+                          autoFocus
+                          onBlur={(e) => {
+                            const v = e.target.value.trim();
+                            if (v) renameColor(c.value, v);
+                            setEditingLabel(null);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') { e.currentTarget.blur(); }
+                            if (e.key === 'Escape') { setEditingLabel(null); }
+                          }}
+                        />
+                      ) : (
+                        <span
+                          className={`color-label ${(!c.label || c.unnamed) ? 'unnamed' : ''}`}
+                          title={c.label || 'Нажмите чтобы задать имя'}
+                          onClick={() => setEditingLabel(c.value)}
+                        >{c.label || '…'}</span>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -349,15 +515,53 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
             rows={2} />
         </div>
 
-        {/* Dependency */}
-        <div className="dep-row">
-          <label htmlFor="dependsOn">После выполнения</label>
-          <select id="dependsOn" value={dependsOnTaskId} onChange={(e) => setDependsOnTaskId(e.target.value)}>
-            <option value="">— независимая —</option>
-            {allTasks
-              .filter((t) => t.id !== editingId && !t.completed)
-              .map((t) => <option key={t.id} value={t.id}>{t.title}</option>)}
-          </select>
+        {/* Subtask inputs — circles + lines, with individual delete */}
+        <div className="subtask-inputs">
+          {subtasks.map((subtask, i) => (
+            <div key={subtask.id || i} className="subtask-input-row">
+              <span className="subtask-dot" />
+              <input
+                className="subtask-input"
+                value={subtask.title}
+                onChange={(e) => {
+                  const next = [...subtasks];
+                  next[i] = { ...subtask, title: e.target.value };
+                  setSubtasks(next);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !subtasks[i + 1]) {
+                    const newId = crypto.randomUUID();
+                    setSubtasks([...subtasks, { id: newId, title: '' }]);
+                    // Focus the newly added input after state update
+                    setTimeout(() => (newSubtaskRef as any).current?.focus(), 0);
+                  }
+                }}
+                ref={i === subtasks.length - 1 && subtasks[subtasks.length - 1].title === '' ? newSubtaskRef : undefined}
+              />
+              {subtasks.length > 0 && (
+                <button
+                  type="button"
+                  className="subtask-remove"
+                  onClick={(e) => { e.stopPropagation(); handleRemoveSubtask(i); }}
+                  title="Удалить подзадачу"
+                >✕</button>
+              )}
+            </div>
+          ))}
+          {subtasks.length === 0 && (
+            <button
+              className="subtask-add"
+              type="button"
+              onClick={() => {
+                const newId = crypto.randomUUID();
+                setSubtasks([{ id: newId, title: '' }]);
+                // Focus the newly added input
+                setTimeout(() => (newSubtaskRef as any).current?.focus(), 0);
+              }}
+            >
+              + подзадача
+            </button>
+          )}
         </div>
 
         {/* Backlog toggle at the bottom */}
@@ -365,7 +569,6 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
           <input type="checkbox" checked={unplanned}
             onChange={(e) => setUnplanned(e.target.checked)} />
           <span className="backlog-label">Бэклог</span>
-          <span className="backlog-hint">задача в бэклоге — не попадает в план на день</span>
         </label>
 
         <div className="modal-actions">

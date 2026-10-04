@@ -8,10 +8,21 @@ interface Props {
   onEdit: (task: Task) => void;
 }
 
-function isBlocked(t: Task, all: Task[]): boolean {
-  if (!t.dependsOnTaskId) return false;
-  const dep = all.find((x) => x.id === t.dependsOnTaskId);
-  return !!dep && !dep.completed;
+// Reorder within a group by re-splicing the ordered id list. The dragged task
+// may also come from the dashboard backlog (same container) or be dropped here
+// from elsewhere — in the latter case it is promoted (unplanned=false) first.
+function makeReorderInGroup(tasks: Task[], group: string, list: Task[]) {
+  return (draggedId: string, targetId: string, place: 'above' | 'below') => {
+    const dragged = tasks.find((t) => t.id === draggedId);
+    if (dragged && dragged.unplanned) store.update(draggedId, { sphere: group, unplanned: false });
+    const baseIds = list.map((t) => t.id);
+    const ids = baseIds.filter((id) => id !== draggedId);
+    let at = ids.indexOf(targetId);
+    if (at < 0) at = ids.length;
+    else if (place === 'below') at += 1;
+    ids.splice(at, 0, draggedId);
+    store.reorder(ids);
+  };
 }
 
 function QuickAdd({ sphere, onDone }: { sphere: string; onDone: () => void }) {
@@ -84,6 +95,7 @@ export function DashboardView({ onEdit }: Props) {
   const [editingName, setEditingName] = useState<string | null>(null);
   const [newSphere, setNewSphere] = useState('');
   const [creating, setCreating] = useState(false);
+  const [draggingSphere, setDraggingSphere] = useState<string | null>(null);
 
   // Backlog = tasks with no concrete date. Completed ones stay visible (dimmed).
   // Dashboard (backlog by category): tasks with a known sphere and no date.
@@ -104,48 +116,78 @@ export function DashboardView({ onEdit }: Props) {
 
   return (
     <div className="dashboard">
-      {spheres.map((s) => {
-        const list = sortByPriority(bySphere.get(s) ?? []);
-        return (
-          <div className="sphere-block" key={s}>
-            <div className="sphere-title">
-              {editingName === s ? (
-                <EditableName
-                  value={s}
-                  onChange={(v) => { store.renameSphere(s, v); setEditingName(null); }}
-                  onDelete={() => { store.removeSphere(s); setEditingName(null); }}
-                />
-              ) : (
-                <div className="sphere-title-inner">
-                  <span className="name" onClick={() => setEditingName(s)}>{s}</span>
-                  <button className="delete-sphere" onClick={() => setEditingName(s)}>×</button>
-                </div>
-              )}
-            </div>
+      <div className="dashboard-spheres">
+        {spheres.map((s) => {
+          const list = sortByPriority(bySphere.get(s) ?? []);
+          return (
             <div
-              className="sphere-tasks"
-              onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+              className={`sphere-block ${draggingSphere === s ? 'dragging' : ''}`}
+              key={s}
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.setData('text/sphere-id', s);
+                setDraggingSphere(s);
+              }}
+              onDragEnd={() => setDraggingSphere(null)}
+              onDragOver={(e) => {
+                e.preventDefault();
+                if (draggingSphere === s) return;
+                e.dataTransfer.dropEffect = 'move';
+              }}
               onDrop={(e) => {
                 e.preventDefault();
-                const id = e.dataTransfer.getData('text/task-id');
-                // Dropping a backlog task onto a category assigns it to that
-                // sphere and promotes it out of the "ДРУГОЕ" backlog.
-                if (id) store.update(id, { sphere: s, unplanned: false });
+                const draggedId = e.dataTransfer.getData('text/sphere-id');
+                if (draggedId && draggingSphere && draggedId !== s) {
+                  const newOrder = [...spheres];
+                  const fromIdx = newOrder.indexOf(draggingSphere);
+                  const toIdx = newOrder.indexOf(s);
+                  if (fromIdx < 0 || toIdx < 0) return;
+                  newOrder.splice(fromIdx, 1);
+                  newOrder.splice(toIdx, 0, draggedId);
+                  store.reorderSpheres(newOrder);
+                  setDraggingSphere(null);
+                }
               }}
             >
-              {list.map((t) => (
-                <TaskItem key={t.id} task={t} blocked={isBlocked(t, tasks)} onEdit={() => onEdit(t)} />
-              ))}
-              {addingIn === s && <QuickAdd sphere={s} onDone={() => setAddingIn(null)} />}
-              {addingIn !== s && (
-                <div className="add-line" onClick={() => setAddingIn(s)} />
-              )}
+              <div className="sphere-title">
+                {editingName === s ? (
+                  <EditableName
+                    value={s}
+                    onChange={(v) => { store.renameSphere(s, v); setEditingName(null); }}
+                    onDelete={() => { store.removeSphere(s); setEditingName(null); }}
+                  />
+                ) : (
+                  <div className="sphere-title-inner">
+                    <span className="name" onClick={() => setEditingName(s)}>{s}</span>
+                    <button className="delete-sphere" onClick={() => setEditingName(s)}>×</button>
+                  </div>
+                )}
+              </div>
+              <div
+                className="sphere-tasks"
+                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const id = e.dataTransfer.getData('text/task-id');
+                  // Dropping a backlog task onto a category assigns it to that
+                  // sphere and promotes it out of the "ДРУГОЕ" backlog.
+                  if (id) store.update(id, { sphere: s, unplanned: false });
+                }}
+              >
+                {list.map((t) => (
+                  <TaskItem key={t.id} task={t} onEdit={() => onEdit(t)} onReorder={t.sphere === s ? makeReorderInGroup(tasks, s, list) : undefined} />
+                ))}
+                {addingIn === s && <QuickAdd sphere={s} onDone={() => setAddingIn(null)} />}
+                {addingIn !== s && (
+                  <div className="add-line" onClick={() => setAddingIn(s)} />
+                )}
+              </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
 
-      <div className="sphere-block new-sphere-block">
+      <div className="new-sphere-block">
         {creating ? (
           <div className="sphere-title">
             <input

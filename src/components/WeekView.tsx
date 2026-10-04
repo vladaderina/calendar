@@ -11,12 +11,6 @@ interface Props {
   onPickDate?: (date: Date) => void;
 }
 
-function isBlocked(t: Task, all: Task[]): boolean {
-  if (!t.dependsOnTaskId) return false;
-  const dep = all.find((x) => x.id === t.dependsOnTaskId);
-  return !!dep && !dep.completed;
-}
-
 function plural(n: number): string {
   const m10 = n % 10, m100 = n % 100;
   if (m10 === 1 && m100 !== 11) return 'день';
@@ -92,20 +86,35 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
   //  (b) tasks that HAVE a planned date range but are still tagged "ДРУГОЕ"
   //      (unplanned=true) — they surface here for the week their range starts
   //      instead of in the day cells, until the user drops them onto a day.
+  //  (c) subtasks of parent tasks that are NOT yet promoted (unplanned=true with date).
   // Tasks that are dated AND promoted (unplanned=false) belong in day cells.
-  const otherTasks = useMemo(() => sortByPriority(tasks.filter((t) => {
-    // "ДРУГОЕ":
-    //  - no-date tasks written here manually WITHOUT a category, OR
-    //  - dated tasks kept in the backlog (unplanned=true) instead of day cells.
-    // Tasks WITHOUT a date that DO have a category belong on the dashboard.
-    if (t.startDate && !t.unplanned) return false; // scheduled → day cells
-    if (!t.startDate && t.sphere) return false;    // categorized backlog → dashboard
-    // Dated-but-backlog task: show HERE only while its range overlaps the
-    // current week (also shown on its day-cells). Outside the range window it
-    // disappears from both views.
-    if (t.startDate && t.unplanned) return days.some((d) => taskOnDate(t, d));
-    return true;
-  })), [tasks, days]);
+  const otherTasks = useMemo(() => {
+    // Get week boundaries for filtering
+    const weekStart = days[0];
+    const weekEnd = days[6];
+    const checkWeekOverlap = (t: Task) => {
+      if (!t.startDate) return true;
+      const tStart = parseISO(fmt.iso(weekStart));
+      const tEnd = parseISO(fmt.iso(weekEnd));
+      const subEnd = t.endDate ? parseISO(t.endDate) : parseISO(t.startDate);
+      return !(subEnd < tStart || parseISO(t.startDate) > tEnd);
+    };
+    const raw = tasks.filter((t) => {
+      // Promoted subtasks (not unplanned, with date) → day cells, not backlog
+      if (t.subtaskOf && !t.unplanned && t.startDate) return false;
+      // Promoted subtasks without date → just remove from backlog
+      if (t.subtaskOf && !t.unplanned) return false;
+      // All remaining subtasks → check if they fit in this week
+      if (t.subtaskOf) return checkWeekOverlap(t);
+      if (t.startDate && !t.unplanned) return false; // scheduled → day cells
+      if (!t.startDate && t.sphere) return false;    // categorized backlog → dashboard
+      if (t.startDate && t.unplanned) return days.some((d) => taskOnDate(t, d));
+      return true;
+    });
+    // Sort: all backlog tasks by priority only (no deadline sorting).
+    const byPriority = sortByPriority(raw);
+    return byPriority;
+  }, [tasks, days]);
 
   // СКОРО: upcoming dated tasks that are PROMOTED (out of the ДРУГОЕ backlog)
   // and not yet completed. Tasks still tagged "ДРУГОЕ" (unplanned) are shown
@@ -122,6 +131,19 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
       .sort((a, b) => a.days - b.days);
   }, [tasks]);
 
+  // Reorder within a list by re-splicing the ordered id list.
+  // Used for backlog / dashboard containers where items never leave the list.
+  const reorderInList = (list: Task[]) =>
+    (draggedId: string, targetId: string, place: 'above' | 'below') => {
+      const baseIds = list.map((t) => t.id);
+      const ids = baseIds.filter((id) => id !== draggedId);
+      let at = ids.indexOf(targetId);
+      if (at < 0) at = ids.length;
+      else if (place === 'below') at += 1;
+      ids.splice(at, 0, draggedId);
+      store.reorder(ids);
+    };
+
   // Reorder within a day. If the dragged task lives in another day (or the
   // backlog), first re-date it to THIS day, then position it among peers.
   const reorderInDay = (iso: string, dayTasks: Task[]) =>
@@ -131,7 +153,14 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
       if (!dragged || !target) return;
       if (place === 'above' && target.priority === 'high') return;
 
+      // Block dragging subtasks onto days after the parent's end date.
       const inThisDay = dayTasks.some((t) => t.id === draggedId);
+      if (!inThisDay && dragged.subtaskOf && dragged.startDate) {
+        const parent = tasks.find((p) => p.id === dragged.subtaskOf);
+        const parentEnd = parent?.endDate || parent?.startDate;
+        if (parentEnd && iso > parentEnd) return;
+      }
+
       if (!inThisDay) {
         store.update(draggedId, { startDate: iso, endDate: iso, unplanned: false });
       }
@@ -153,19 +182,42 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
     return (
       <div className="cell" key={iso}>
         <div className={`cell-header ${isToday ? 'today' : ''}`} onClick={() => onPickDate?.(d)}>
-          <span className={`cell-title ${isToday ? 'today' : ''}`}>{fmt.dayShort(d)}</span>
-          <span className={`cell-weekday ${isToday ? 'today' : ''}`}>{fmt.weekdayShort(d)}</span>
+          <span className={`cell-date-block ${isToday ? 'today' : ''}`}>
+            <span className="cell-date-main">{fmt.dayShort(d)}</span>
+          </span>
+          <span className="cell-weekday-name">{fmt.weekdayShort(d)}</span>
         </div>
         <div
           className="cell-body"
           onClick={() => !adding && setAdding(iso)}
-          onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            const id = e.dataTransfer.getData('text/task-id');
+            if (id) {
+              const t = tasks.find((x) => x.id === id);
+              if (t?.subtaskOf) {
+                const parent = tasks.find((p) => p.id === t.subtaskOf);
+                const parentEnd = parent?.endDate || parent?.startDate;
+                if (parentEnd && iso > parentEnd) {
+                  e.dataTransfer.dropEffect = 'none';
+                  return;
+                }
+              }
+            }
+            e.dataTransfer.dropEffect = 'move';
+          }}
           onDrop={(e) => {
             e.preventDefault();
             const id = e.dataTransfer.getData('text/task-id');
             if (!id) return;
             const t = tasks.find((x) => x.id === id);
             if (!t) return;
+            // Block dragging subtasks onto days after the parent's end date.
+            if (t.subtaskOf) {
+              const parent = tasks.find((p) => p.id === t.subtaskOf);
+              const parentEnd = parent?.endDate || parent?.startDate;
+              if (parentEnd && iso > parentEnd) return;
+            }
             if (t.unplanned && t.startDate) {
               // Dated "ДРУГОЕ" task: promote it out of the backlog and
               // collapse its planned range onto this single dropped day.
@@ -198,7 +250,6 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
               key={t.id}
               task={t}
               date={d}
-              blocked={isBlocked(t, tasks)}
               onEdit={() => onEdit(t, fmt.iso(d))}
               onReorder={reorderInDay(iso, dayTasks)}
             />
@@ -227,7 +278,7 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
 
         <div className="cell">
           <div className="cell-header">
-            <span className="cell-title muted">БЭКЛОГ</span>
+            <span className={`cell-title muted`}>БЭКЛОГ</span>
           </div>
           <div
             className="cell-body"
@@ -243,9 +294,24 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
               if (id) store.update(id, { unplanned: true, sphere: undefined });
             }}
           >
-            {otherTasks.map((t) => (
-              <TaskItem key={t.id} task={t} blocked={isBlocked(t, tasks)} onEdit={() => onEdit(t, t.startDate)} />
-            ))}
+            {otherTasks.map((t) => {
+              const isParent = !t.subtaskOf && t.subtaskIds && t.subtaskIds.length > 0;
+              const { done, total } = isParent ? store.subtaskCompletion(t.id) : { done: 0, total: 0 };
+              return (
+                <div key={t.id} className="backlog-task-row">
+                  <TaskItem
+                    task={t}
+                    onEdit={() => onEdit(t, t.startDate)}
+                    onReorder={reorderInList(otherTasks)}
+                  />
+                  {isParent && total > 0 && (
+                    <span className="subtask-count" title={`${done}/${total} подзадач выполнено`}>
+                      [{done}/{total}]
+                    </span>
+                  )}
+                </div>
+              );
+            })}
             {adding === OTHER
               ? <QuickAdd defaults={{ unplanned: true }} onDone={() => setAdding(null)} />
               : <div className="add-line" onClick={(e) => { e.stopPropagation(); setAdding(OTHER); }} />}

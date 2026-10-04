@@ -1,13 +1,32 @@
 import { useState } from 'react';
 import type { Task } from '../types';
 import { store } from '../store';
+import { useTasks } from '../store';
 import { RecurringDeleteModal } from './RecurringDeleteModal';
 import { isDoneOn } from '../utils/date';
+
+function SubtaskCounter({ parentId }: { parentId: string }) {
+  const tasks = useTasks();
+  const parent = tasks.find((t) => t.id === parentId);
+  if (!parent?.subtaskIds?.length) return null;
+  let done = 0;
+  let total = 0;
+  for (const id of parent.subtaskIds) {
+    const sub = tasks.find((t) => t.id === id);
+    if (!sub) continue;
+    total++;
+    if (sub.completed) done++;
+  }
+  return (
+    <span className="subtask-count" title={`${done} из ${total} подзадач выполнены`}>
+      {done}/{total}
+    </span>
+  );
+}
 
 interface Props {
   task: Task;
   date?: Date;
-  blocked?: boolean;
   onEdit?: () => void;
   /** Show recurrence-confirmation prompt before deleting. Omit to delete
    *  immediately (used by views that can't pass a selected date). */
@@ -58,7 +77,7 @@ function TrashIcon() {
 
 // Left click = complete / uncomplete. Right click = open editor.
 // The trash icon (visible on row hover) deletes with a recurrence confirmation.
-export function TaskItem({ task, date, blocked, onEdit, selectedDate, onReorder }: Props) {
+export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props) {
   const hl = !!task.color;
   const bg = task.color ? toHighlight(task.color) : undefined;
   const [over, setOver] = useState<null | 'top' | 'bottom'>(null);
@@ -72,7 +91,6 @@ export function TaskItem({ task, date, blocked, onEdit, selectedDate, onReorder 
     hl && 'hl',
     done && 'completed',
     task.unplanned && !done && 'unplanned',
-    blocked && 'blocked',
     over && `drop-${over}`,
   ]
     .filter(Boolean)
@@ -88,7 +106,8 @@ export function TaskItem({ task, date, blocked, onEdit, selectedDate, onReorder 
       setShowRecurDelete(true);
       return;
     }
-    store.remove(task.id);
+    // Delete the task and all its INCOMPLETED subtasks recursively
+    store.removeWithSubtasks(task.id);
   };
 
   const handleRecurringDelete = (mode: 'single' | 'following' | 'all') => {
@@ -130,6 +149,10 @@ export function TaskItem({ task, date, blocked, onEdit, selectedDate, onReorder 
         if (!onReorder) return;
         e.preventDefault();
       }}
+      onDragOver={(e) => {
+        if (!onReorder) return;
+        e.preventDefault();
+      }}
       onMouseEnter={() => {
         setHover(true);
         // Notify parent (e.g. cell-body) that a child is hovered, in case it
@@ -165,6 +188,9 @@ export function TaskItem({ task, date, blocked, onEdit, selectedDate, onReorder 
       )}
       <span className="title">{task.title}</span>
       {task.priority === 'high' && <span className="meta">!</span>}
+      {!task.subtaskOf && task.subtaskIds && task.subtaskIds.length > 0 && (
+        <SubtaskCounter parentId={task.id} />
+      )}
       {/* Trash icon: grey by default, black on row hover. Click opens the
           recurrence confirmation (or deletes immediately for non-recurring). */}
       <button
