@@ -43,7 +43,10 @@ export function getColors(): TaskColor[] {
       // even if the user has an old stored palette.
       const merged = DEFAULT_COLORS.map((def) => {
         const stored = parsed.find((p: TaskColor) => p.value === def.value);
-        return stored ? { ...def, label: stored.label } : def;
+        if (!stored) return def;
+        // Carry the stored label AND the disabled flag (unnamed: true), so a
+        // color the user removed stays unavailable after a reload.
+        return { ...def, label: stored.label, unnamed: stored.unnamed };
       });
       return merged;
     }
@@ -73,8 +76,9 @@ export function addColor(_value: string, _label: string): void {
   // no-op: palette is fixed
 }
 
-// Removed: removeColor — the palette is now fixed/curated.
-// Kept for backward compat with TaskModal imports (no-op).
-export function removeColor(_value: string): void {
-  // no-op: palette is fixed
+// Deactivate a color: clears its label and marks it unnamed so it can no
+// longer be picked. The swatch stays in the picker (dimmed, with a "…"
+// placeholder) so the user can assign it a name again later.
+export function removeColor(value: string): void {
+  saveColors(getColors().map((c) => (c.value === value ? { ...c, label: '', unnamed: true } : c)));
 }

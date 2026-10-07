@@ -148,12 +148,12 @@ export function MonthView({ anchor, onEdit, onPickDate }: Props) {
                       )}
                     </div>
                     <div style={{ flex: 1, minHeight: 0 }}>
-                      {/* Existing tasks for this day (max 3 visible) */}
-                      {dayTasks.slice(0, 3).map((t) => (
+                      {/* Existing tasks for this day (max 5 visible) */}
+                      {dayTasks.slice(0, 5).map((t) => (
                         <TaskItem key={t.id} task={t} date={d} onEdit={() => onEdit(t, dayIso)} />
                       ))}
-                      {dayTasks.length > 3 && (
-                        <span style={{ fontSize: 11, color: 'var(--muted)' }}>+{dayTasks.length - 3}</span>
+                      {dayTasks.length > 5 && (
+                        <span style={{ fontSize: 11, color: 'var(--muted)' }}>+{dayTasks.length - 5}</span>
                       )}
                       {/* Inline task editor - shows only ONE input */}
                       {isEditing && (

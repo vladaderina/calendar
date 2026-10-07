@@ -271,11 +271,8 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
       {/* First row: Mon–Fri */}
       <div className="week-row">{workdays.map(renderDayCell)}</div>
 
-      {/* Bottom row: Sat, Sun (left); backlog + soon (right) */}
+      {/* Bottom row: backlog, soon, then Sat + Sun (left→right order) */}
       <div className="week-row bottom-row">
-        {renderDayCell(sat)}
-        {renderDayCell(sun)}
-
         <div className="cell">
           <div className="cell-header">
             <span className={`cell-title muted`}>БЭКЛОГ</span>
@@ -334,6 +331,9 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
             )}
           </div>
         </div>
+
+        {renderDayCell(sat)}
+        {renderDayCell(sun)}
       </div>
     </div>
   );

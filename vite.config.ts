@@ -14,9 +14,6 @@ function weatherProxyPlugin() {
         const suffix = req.url.replace(/^\/api\/weather/, '')
         const targetUrl = `${TARGET}${suffix}`
         try {
-          // Node's fetch doesn't transparently use HTTP_PROXY/HTTPS_PROXY for
-          // upstream HTTPS targets. Use curl (which respects the proxy env vars)
-          // to fetch the weather data through the corporate proxy.
           const { stdout } = await execFileAsync('curl', [
             '--silent', '--show-error',
             '--noproxy', '',
@@ -37,9 +34,10 @@ function weatherProxyPlugin() {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   return {
-    // Inject Supabase credentials as compile-time globals.
-    // Vite replaces __SUPABASE_URL__ / __SUPABASE_ANON_KEY__ in all modules,
-    // so import.meta.env is not needed (and doesn't work reliably in browser ESM).
+    // Base path — совпадает с секретным путём nginx.
+    // Все ассеты в собранном index.html получат префикс /luna-calendar-secure/
+    base: '/luna-calendar-secure/',
+
     define: {
       __SUPABASE_URL__: JSON.stringify(env.VITE_SUPABASE_URL || ''),
       __SUPABASE_ANON_KEY__: JSON.stringify(env.VITE_SUPABASE_ANON_KEY || ''),

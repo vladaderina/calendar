@@ -14,9 +14,68 @@ const anonKey = typeof __SUPABASE_ANON_KEY__ !== 'undefined' ? __SUPABASE_ANON_K
 // Otherwise the app falls back to localStorage (existing behaviour).
 export const isSupabaseAvailable = Boolean(url && anonKey);
 
+// supabase-js (gotrue) wraps every token read in navigator.locks.request().
+// In this environment that call never settles, so the promise chain stalls
+// BEFORE the HTTP request is ever issued: the app renders an empty week with 55
+// tasks sitting in the database, and no request appears in the network panel.
+// A single-tab app needs no cross-process lock, so we install a pass-through
+// one rather than depend on a browser API that can silently hang.
+const passThroughLock = {
+  request: async (_name: string, _opts: any, fn: any) => {
+    const run = typeof _opts === 'function' ? _opts : fn;
+    return run({ name: _name, mode: 'exclusive' });
+  },
+};
+if (typeof globalThis.navigator !== 'undefined') {
+  try {
+    Object.defineProperty(globalThis.navigator, 'locks', {
+      configurable: true,
+      writable: true,
+      value: passThroughLock,
+    });
+  } catch {
+    // Some engines refuse to redefine it; the app then behaves as before.
+  }
+}
+
+// A network call to the Supabase host can stall indefinitely on some links
+// (observed here: roughly every third request hangs until the OS gives up,
+// while the rest answer in ~150ms). Without a deadline the client waits on the
+// stuck socket forever and the app looks frozen; with one, a stalled request
+// fails fast and the next attempt picks the change up.
+//
+// The deadline is deliberately short. Healthy responses take 180–400ms, so a
+// request still silent after a few seconds is stuck, not slow — burning 8s on
+// it also holds a connection slot (browsers allow only ~6 per host) that the
+// other slices need. Failing fast and retrying recovers far quicker.
+const REQUEST_TIMEOUT_MS = 3500;
+
+const fetchWithTimeout: typeof fetch = (input, init) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const signal = init?.signal;
+  // Respect a caller-supplied signal as well as our deadline.
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+  return fetch(input, { ...init, signal: controller.signal }).finally(() =>
+    clearTimeout(timer),
+  );
+};
+
 export const supabase: SupabaseClient | null = isSupabaseAvailable
-  ? createClient(url!, anonKey!)
+  ? createClient(url!, anonKey!, {
+      global: { fetch: fetchWithTimeout },
+      realtime: { params: { eventsPerSecond: 10 } },
+    })
   : null;
+
+// Debug: export to window
+if (typeof window !== 'undefined') {
+  (window as any).supabase = supabase;
+  (window as any).isSupabaseAvailable = isSupabaseAvailable;
+}
 
 // Convert a local Task to the DB-shaped row and back, keeping field name
 // parity with the schema in supabase/migrations/20240927_tasks_schema.sql

@@ -118,7 +118,7 @@ export function DatePickerModal({ anchor, currentStart, currentEnd, onSelect, on
             <span className="color-filter-swatch" style={{ background: 'transparent', border: '1px dashed var(--muted)' }} />
             <span style={{ fontSize: 10, color: 'var(--ink)', marginLeft: 4 }}>Все</span>
           </button>
-          {getColors().map((c) => (
+          {getColors().filter((c) => c.label && !c.unnamed).map((c) => (
             <button
               key={c.value}
               className={`color-filter-btn ${colorFilter === c.value ? 'selected' : ''}`}
@@ -168,22 +168,21 @@ export function DatePickerModal({ anchor, currentStart, currentEnd, onSelect, on
           })}
         </div>
 
-        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: 13, color: 'var(--muted)' }}>
+        <div className="date-picker-footer">
+          <div className="date-picker-picked">
             {tempStart && <span>Начало: {tempStart}</span>}
-            {tempEnd && <span style={{ marginLeft: 16 }}>Конец: {tempEnd}</span>}
+            {tempEnd && <span>Конец: {tempEnd}</span>}
             <button
               className="btn ghost"
-              style={{ marginLeft: 12, fontSize: 13 }}
               onClick={() => setSelecting('start')}
               disabled={!tempStart && !tempEnd}
               title="Выбрать заново начало"
             >изменить начало</button>
             {(tempStart || tempEnd) && (
-              <button className="btn ghost" style={{ marginLeft: 4, fontSize: 13 }} onClick={clearDates}>очистить</button>
+              <button className="btn ghost" onClick={clearDates}>очистить</button>
             )}
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div className="date-picker-actions">
             <button className="btn ghost" onClick={onClose}>отмена</button>
             <button className="btn primary" onClick={handleSave} disabled={!singleDate && !tempStart}>выбрать</button>
           </div>

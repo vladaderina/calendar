@@ -4,7 +4,7 @@ import { store, useSpheres } from '../store';
 import { DatePickerModal } from './DatePickerModal';
 import { fmt } from '../utils/date';
 import { parseISO } from 'date-fns';
-import { getColors, renameColor, NO_COLOR } from '../config/colors';
+import { getColors, renameColor, removeColor, NO_COLOR } from '../config/colors';
 
 const PRIORITY_ORDER: Priority[] = ['low', 'normal', 'high'];
 const PRIORITY_LABEL: Record<Priority, string> = { low: 'низкий', normal: 'обычный', high: 'высокий' };
@@ -493,6 +493,15 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
                           onClick={() => setEditingLabel(c.value)}
                         >{c.label || '…'}</span>
                       )}
+                      {/* Deactivate: clears the name and disables the color.
+                          Re-naming it (click the label) makes it usable again. */}
+                      <button
+                        type="button"
+                        className="color-row-del"
+                        title="Убрать название (цвет станет недоступен)"
+                        aria-label="Убрать название цвета"
+                        onClick={(e) => { e.stopPropagation(); removeColor(c.value); }}
+                      >✕</button>
                     </div>
                   ))}
                 </div>

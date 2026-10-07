@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { Task } from '../types';
 import { store } from '../store';
 import { useTasks } from '../store';
@@ -75,16 +75,59 @@ function TrashIcon() {
   );
 }
 
+// Pencil — the touch replacement for right-click-to-edit.
+function PencilIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M4 20h4l10-10a2.8 2.8 0 0 0-4-4L4 16v4z" />
+      <path d="M13.5 6.5l4 4" />
+    </svg>
+  );
+}
+
 // Left click = complete / uncomplete. Right click = open editor.
 // The trash icon (visible on row hover) deletes with a recurrence confirmation.
+//
+// Touch devices have no right-click, so they get two extra affordances: a
+// long-press on the row opens the editor, and a pencil button that is always
+// visible there (there is no hover to reveal controls on a phone).
 export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props) {
   const hl = !!task.color;
   const bg = task.color ? toHighlight(task.color) : undefined;
   const [over, setOver] = useState<null | 'top' | 'bottom'>(null);
   const [hover, setHover] = useState(false);
   const [showRecurDelete, setShowRecurDelete] = useState(false);
+  const longPressTimer = useRef<number | null>(null);
+  const didLongPress = useRef(false);
 
   const done = date ? isDoneOn(task, date) : task.completed;
+
+  const cancelLongPress = () => {
+    if (longPressTimer.current !== null) {
+      window.clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
+
+  const startLongPress = () => {
+    if (!onEdit) return;
+    didLongPress.current = false;
+    cancelLongPress();
+    longPressTimer.current = window.setTimeout(() => {
+      didLongPress.current = true;
+      onEdit();
+    }, 500);
+  };
 
   const cls = [
     'task',
@@ -131,6 +174,11 @@ export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props)
       style={hl ? ({ ['--hl' as any]: bg } as any) : undefined}
       onClick={(e) => {
         e.stopPropagation();
+        // A long-press already opened the editor — don't also toggle done.
+        if (didLongPress.current) {
+          didLongPress.current = false;
+          return;
+        }
         toggle();
       }}
       onContextMenu={(e) => {
@@ -138,6 +186,10 @@ export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props)
         e.stopPropagation();
         onEdit?.();
       }}
+      onTouchStart={startLongPress}
+      onTouchEnd={cancelLongPress}
+      onTouchMove={cancelLongPress}
+      onTouchCancel={cancelLongPress}
       draggable
       onDragStart={(e) => {
         e.stopPropagation();
@@ -205,6 +257,24 @@ export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props)
       >
         <TrashIcon />
       </button>
+
+      {/* Touch-only edit affordance: no hover means no way to reach the
+          editor otherwise, since right-click doesn't exist on a phone. */}
+      {onEdit && (
+        <button
+          type="button"
+          className="task-edit-btn"
+          title="Изменить"
+          onClick={(e) => {
+            e.stopPropagation();
+            cancelLongPress();
+            onEdit();
+          }}
+          aria-label="Изменить задачу"
+        >
+          <PencilIcon />
+        </button>
+      )}
 
       {showRecurDelete && (
         <RecurringDeleteModal

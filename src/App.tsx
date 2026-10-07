@@ -10,11 +10,12 @@ import { YearView } from './components/YearView';
 import { DashboardView } from './components/DashboardView';
 import { PlannedListView } from './components/PlannedListView';
 import { AnalyticsView } from './components/AnalyticsView';
-import { store, useJournal, useLastView } from './store';
+import { store, useLastView, useJournal, pullRemoteTasks } from './store';
 import { initSupabase } from './store';
 import { TaskModal } from './components/TaskModal';
 import { SearchModal } from './components/SearchModal';
 import { ChevronIcon } from './icons/ChevronIcon';
+import { AuthGate } from './components/AuthGate';
 
 // Inline SVG icons for the top nav.
 const DashboardIcon = () => (
@@ -62,10 +63,15 @@ const JournalIcon = () => (
   </svg>
 );
 
-// Initialize Supabase on app load
-void initSupabase();
+const RefreshIcon = () => (
+  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <path d="M23 4v6h-6" />
+    <path d="M1 20v-6h6" />
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36M20.49 15a9 9 0 0 1-14.85 3.36" />
+  </svg>
+);
 
-export default function App() {
+function AppContent() {
   // View comes from the store (persisted in localStorage + Supabase)
   const view = useLastView() as View;
   const setViewPersisted = (next: View) => {
@@ -75,10 +81,17 @@ export default function App() {
   const [modal, setModal] = useState<{ initial?: Partial<Task>; editingId?: string; selectedDate?: string } | null>(null);
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [journalActive, setJournalActive] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const journalData = useJournal();
   const [journalText, setJournalText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const journalSectionRef = useRef<HTMLDivElement>(null);
+  const mobileNavRef = useRef<HTMLElement>(null);
+
+  // Initialize Supabase when component mounts
+  useEffect(() => {
+    void initSupabase();
+  }, []);
 
   const shift = (dir: 1 | -1) => {
     switch (view) {
@@ -86,6 +99,15 @@ export default function App() {
       case 'week': setAnchor((d) => addWeeks(d, dir)); break;
       case 'month': setAnchor((d) => addMonths(d, dir)); break;
       case 'year': setAnchor((d) => addYears(d, dir)); break;
+    }
+  };
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await pullRemoteTasks();
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
@@ -111,6 +133,11 @@ export default function App() {
     }
   })();
 
+  // "Calendar section" = any date-grid view (week/day/month/year), used by the
+  // mobile bottom tab bar to light up the week icon. Dashboard/notes excluded.
+  const isCalendarSection =
+    view === 'week' || view === 'day' || view === 'month' || view === 'year';
+
   const goToWeek = () => {
     setViewPersisted('week')
     setAnchor(new Date());
@@ -119,17 +146,6 @@ export default function App() {
   const openEdit = (t: Task, editingDate?: string) => {
     setModal({ initial: t, editingId: t.id, selectedDate: editingDate });
     setShowSearchModal(false);
-  };
-
-  const clearAll = () => {
-    if (window.confirm('Удалить все данные? Это действие нельзя отменить.')) {
-      localStorage.removeItem('calendar.tasks.v1');
-      localStorage.removeItem('calendar.spheres.v1');
-      localStorage.removeItem('calendar.journal.v1');
-      localStorage.removeItem('calendar.view.v1');
-      store.clearAll();
-      window.location.reload();
-    }
   };
 
   // Load empty journal text when journal is opened (user types fresh content)
@@ -147,10 +163,14 @@ export default function App() {
     }
   }, [journalActive, journalText, anchor]);
 
-  // Handle click outside to close journal
+  // Handle click outside to close journal (the mobile nav's notes button
+  // toggles it, so taps there must NOT count as "outside")
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (journalSectionRef.current && !journalSectionRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      const insideJournal = journalSectionRef.current?.contains(target) ?? false;
+      const insideMobileNav = mobileNavRef.current?.contains(target) ?? false;
+      if (!insideJournal && !insideMobileNav) {
         setJournalActive(false);
       }
     };
@@ -204,14 +224,9 @@ export default function App() {
             {(view === 'analytics') && (
               <button className="back-btn" onClick={() => setViewPersisted('week')}>‹</button>
             )}
-            <h1>{title}</h1>
+            <h1 className={subtitle ? 'has-subtitle' : ''}>{title}</h1>
             {subtitle && (
               <div className="view-subtitle" title={subtitle}>{subtitle}</div>
-            )}
-            {view === 'dashboard' && (
-              <button className="clear-all-btn" title="Удалить все задачи" onClick={clearAll}>
-                🗑
-              </button>
             )}
           </div>
 
@@ -280,6 +295,7 @@ export default function App() {
               <>
                 <button className="today-btn" onClick={() => setAnchor(new Date())}>сегодня</button>
                 <button className="nav-btn-search" onClick={() => setShowSearchModal(true)} title="Поиск" aria-label="Поиск"><SearchIcon /></button>
+                <button className={`nav-btn-arrow nav-btn-refresh ${isRefreshing ? 'refreshing' : ''}`} onClick={handleRefresh} disabled={isRefreshing} title="Обновить" aria-label="Обновить"><RefreshIcon /></button>
                 <button className="nav-btn-arrow" onClick={() => shift(-1)} aria-label="Назад"><ChevronIcon dir="left" /></button>
                 <button className="nav-btn-arrow" onClick={() => shift(1)} aria-label="Вперёд"><ChevronIcon dir="right" /></button>
               </>
@@ -299,7 +315,7 @@ export default function App() {
       </div>
 
       {/* Inline journal editor at bottom-right */}
-      <div className="inline-journal-section" ref={journalSectionRef}>
+      <div className={`inline-journal-section ${journalActive ? 'journal-open' : ''}`} ref={journalSectionRef}>
         {journalActive && (
           <textarea
             ref={textareaRef}
@@ -322,6 +338,36 @@ export default function App() {
         </button>
       </div>
 
+      {/* Mobile-only bottom tab bar: week / dashboard / notes.
+          Hidden on desktop (.mobile-bottom-nav is display:none above 720px)
+          so the laptop keeps the full header switcher untouched. */}
+      <nav className="mobile-bottom-nav" ref={mobileNavRef} aria-label="Основная навигация">
+        <button
+          className={`mobile-nav-btn ${view === 'dashboard' ? 'active' : ''}`}
+          onClick={() => setViewPersisted('dashboard')}
+          title="Дашборд"
+          aria-label="Дашборд"
+        >
+          <DashboardIcon />
+        </button>
+        <button
+          className={`mobile-nav-btn ${isCalendarSection ? 'active' : ''}`}
+          onClick={() => setViewPersisted('week')}
+          title="Неделя"
+          aria-label="Неделя"
+        >
+          <WeekViewIcon />
+        </button>
+        <button
+          className={`mobile-nav-btn ${journalActive ? 'active' : ''}`}
+          onClick={toggleJournal}
+          title="Заметки"
+          aria-label="Заметки"
+        >
+          <JournalIcon />
+        </button>
+      </nav>
+
       {modal && (
         <TaskModal
           initial={modal.initial}
@@ -338,5 +384,11 @@ export default function App() {
         />
       )}
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthGate onUserLoaded={() => {}}>{<AppContent />}</AuthGate>
   );
 }

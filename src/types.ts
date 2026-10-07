@@ -29,6 +29,9 @@ export interface Task {
   startDate?: string;
   endDate?: string;
   sphere?: Sphere;
+  /** Optional sub-section ("топик") inside `sphere`. Tasks without one belong
+   *  to the implicit "Основное" topic of their category. */
+  topic?: string;
   recurrence: Recurrence;
   /** Weekdays to repeat on (Mon=1 … Sun=7). Used with `recurrence: 'weekdays'`. */
   recurrenceDays?: Weekday[];
@@ -56,3 +59,6 @@ export interface Task {
 }
 
 export type View = 'dashboard' | 'day' | 'week' | 'month' | 'year' | 'planned' | 'analytics';
+
+/** Name of the implicit topic every category has and cannot delete. */
+export const DEFAULT_TOPIC = 'Основное';
