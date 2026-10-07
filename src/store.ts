@@ -10,6 +10,10 @@ const SPHERES_KEY = 'calendar.spheres.v1';
 const TOPICS_KEY = 'calendar.topics.v1';
 const JOURNAL_KEY = 'calendar.journal.v1';
 const VIEW_KEY = 'calendar.view.v1';
+// Deletion tombstones: a delete that has not been confirmed by the server yet
+// must survive a page reload, or reloading while a delete is in flight brings
+// the category/note back. Kept in localStorage, not in memory.
+const TOMBSTONES_KEY = 'calendar.tombstones.v1';
 
 // ── LocalStorage helpers (fallback + offline cache) ──────────────────────
 function loadTasks(): Task[] {
@@ -102,7 +106,11 @@ function emit() {
   localStorage.setItem(VIEW_KEY, lastView);
   // Journal / spheres / view are diffed against the server-confirmed shadows
   // in flushPending; nudge a flush only when one of them actually moved.
-  if (syncedJournal !== journal || syncedSpheres !== spheres || syncedView !== lastView) {
+  if (
+    !sameJournal(syncedJournal, journal) ||
+    !sameStringArray(syncedSpheres, spheres) ||
+    syncedView !== lastView
+  ) {
     scheduleSync();
   }
   listeners.forEach((l) => l());
@@ -217,6 +225,53 @@ let syncedJournal: Record<string, string> | null = null;
 let syncedSpheres: string[] | null = null;
 let syncedView: string | null = null;
 
+// ── Deletion tombstones ──────────────────────────────────────────────────
+// A pending deletion must survive a fetch that still sees the row.
+//
+// The fetch paths ADOPT anything the server has and we do not (that is how an
+// entry written on the phone reaches the laptop). The same rule resurrects a
+// row the user just deleted while its DELETE was still in flight or had
+// failed: the fetch re-adds it, and since the local list now matches the
+// server again, no retry is ever scheduled — the deletion is lost for good and
+// the note/category reappears on every reload.
+//
+// Remembering the key until the delete is CONFIRMED is what makes a deletion
+// stick. Entries leave these sets only after the server accepted the delete.
+const deletedJournalKeys = new Set<string>();
+const deletedSpheres = new Set<string>();
+
+// Persist the tombstones so an unconfirmed delete survives a reload. Without
+// this, closing or refreshing the tab while the DELETE is still in flight
+// loses the tombstone, and the next fetch adopts the row back.
+function loadTombstones(): void {
+  try {
+    const raw = localStorage.getItem(TOMBSTONES_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as { journal?: string[]; spheres?: string[] };
+    (parsed.journal ?? []).forEach((k) => deletedJournalKeys.add(k));
+    (parsed.spheres ?? []).forEach((n) => deletedSpheres.add(n));
+  } catch {
+    // A corrupt blob is not worth failing startup over.
+  }
+}
+
+function saveTombstones(): void {
+  try {
+    localStorage.setItem(
+      TOMBSTONES_KEY,
+      JSON.stringify({
+        journal: [...deletedJournalKeys],
+        spheres: [...deletedSpheres],
+      }),
+    );
+  } catch {
+    // Quota/private-mode failures are non-fatal: tombstones then live for the
+    // session only.
+  }
+}
+
+loadTombstones();
+
 function queueTaskPut(id: string) {
   taskDeleteQueue.delete(id);
   taskPutQueue.add(id);
@@ -239,14 +294,53 @@ function scheduleSync() {
   }, SYNC_DEBOUNCE_MS);
 }
 
+// ── Value comparison for the sync shadows ─────────────────────────────────
+// The shadows must be compared BY VALUE, never by reference.
+//
+// `syncedJournal`/`syncedSpheres` are assigned a fresh object/array after a
+// confirmed write, but `journal`/`spheres` are also replaced by new objects on
+// every edit. Comparing the two with `!==` therefore reports "changed" even
+// when the contents are identical — which kept `hasPendingSync()` true forever
+// and made every flush loop the full 50 iterations, re-uploading the whole
+// journal and palette each time.
+function sameJournal(a: Record<string, string> | null, b: Record<string, string>): boolean {
+  if (!a) return false;
+  const ak = Object.keys(a);
+  const bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  return ak.every((k) => a[k] === b[k]);
+}
+
+function sameStringArray(a: string[] | null, b: string[]): boolean {
+  if (!a) return false;
+  if (a.length !== b.length) return false;
+  return a.every((v, i) => v === b[i]);
+}
+
 function hasPendingSync(): boolean {
   return (
     taskPutQueue.size > 0 ||
     taskDeleteQueue.size > 0 ||
-    syncedJournal !== journal ||
-    syncedSpheres !== spheres ||
+    !sameJournal(syncedJournal, journal) ||
+    !sameStringArray(syncedSpheres, spheres) ||
+    deletedJournalKeys.size > 0 ||
+    deletedSpheres.size > 0 ||
     syncedView !== lastView
   );
+}
+
+// A cheap fingerprint of "what is still owed to the server". Two consecutive
+// identical fingerprints across a flush mean no progress was made.
+function pendingSignature(): string {
+  return [
+    taskPutQueue.size,
+    taskDeleteQueue.size,
+    sameJournal(syncedJournal, journal) ? 0 : 1,
+    sameStringArray(syncedSpheres, spheres) ? 0 : 1,
+    deletedJournalKeys.size,
+    deletedSpheres.size,
+    syncedView === lastView ? 0 : 1,
+  ].join('|');
 }
 
 async function drainSync(): Promise<void> {
@@ -258,8 +352,19 @@ async function drainSync(): Promise<void> {
     // Mutations arriving while we await re-queue themselves, so loop until
     // quiet. The iteration cap is a safety valve, not an expected exit.
     let guard = 0;
+    // If a flush leaves the pending state completely unchanged the write is
+    // failing (network, or a rejected DELETE). Retrying it in a tight loop
+    // would just hammer the connection, so bail out after two identical
+    // rounds; the next real edit — or the next fetch — schedules a fresh one.
+    let stalled = 0;
     while (hasPendingSync() && guard++ < 50) {
+      const sig = pendingSignature();
       await flushPending();
+      if (pendingSignature() === sig) {
+        if (++stalled >= 2) break;
+      } else {
+        stalled = 0;
+      }
     }
   } finally {
     syncPumpRunning = false;
@@ -319,7 +424,21 @@ async function flushPending(): Promise<void> {
   try {
     const shadow = syncedJournal ?? {};
     const changed = Object.entries(journal).filter(([k, v]) => shadow[k] !== v);
-    const removed = Object.keys(shadow).filter((k) => !(k in journal));
+    // What has to be deleted: keys the server held that we no longer do, PLUS
+    // every tombstone. Deriving this from `shadow` alone is not enough —
+    // `syncedJournal` is still null until the first successful journal fetch,
+    // and on a flaky connection that can be indefinitely. A note cleared in
+    // that window would compute `removed` as empty, so its DELETE would never
+    // run, the row would stay on the server, and the next successful fetch
+    // would hand the note straight back: the "my note keeps coming back"
+    // complaint. The tombstones are the durable record of intent.
+    const removed = [
+      ...new Set([
+        ...Object.keys(shadow).filter((k) => !(k in journal)),
+        ...deletedJournalKeys,
+      ]),
+    ];
+    let ok = true;
     if (changed.length > 0) {
       // onConflict is REQUIRED here. These rows carry no `id`, so PostgREST
       // would default the conflict target to the primary key, which never
@@ -336,34 +455,49 @@ async function flushPending(): Promise<void> {
         { onConflict: 'user_id,date_key' },
       );
       if (error) {
-        // Do NOT advance the shadow on failure, or the entry is never
-        // retried and silently stays out of sync forever.
         console.warn('[supabase] journal upsert error:', error.message);
-      } else {
-        syncedJournal = { ...journal };
+        ok = false;
       }
-    } else {
-      syncedJournal = { ...journal };
     }
     if (removed.length > 0) {
-      await supabase
+      // The delete is NOT gated on the upsert above. Nesting it meant a slow or
+      // failed upsert skipped the delete, leaving the row on the server for the
+      // next fetch to resurrect — the cleared note that kept coming back.
+      // A delete must also be CONFIRMED before its tombstone is dropped.
+      const { error } = await supabase
         .from('journal_entries')
         .delete()
         .eq('user_id', userId)
         .in('date_key', removed);
+      if (error) {
+        console.warn('[supabase] journal delete error:', error.message);
+        ok = false;
+      } else {
+        // Confirmed gone — stop guarding it against re-adoption.
+        removed.forEach((k) => deletedJournalKeys.delete(k));
+        saveTombstones();
+      }
     }
-    // The shadow is advanced inside the upsert branch above — only on a
-    // confirmed write — so a failed flush stays pending and is retried.
+    // Advance the diff baseline only when every write landed; otherwise the
+    // change stays pending and the next flush retries it.
+    if (ok) syncedJournal = { ...journal };
   } catch (e) {
     console.warn('[supabase] sync journal error:', e);
   }
 
-  // ── Spheres: only when the list or its order actually changed ─────────
+  // ── Spheres ───────────────────────────────────────────────────────────
   try {
-    if (syncedSpheres !== spheres) {
-      // Same story as the journal: these rows have no `id`, so the conflict
-      // target must be the real unique key (user_id, name) or the write
-      // fails with 23505 against spheres_user_name_idx.
+    // The upsert and the delete are INDEPENDENT writes.
+    //
+    // They used to be nested — delete inside the upsert's success branch —
+    // which meant a slow or failed upsert (routine on this connection) skipped
+    // the delete entirely. The row then stayed in the table and the next fetch
+    // brought the category straight back: exactly the reported "I delete a
+    // category and it comes back" symptom. Each write now reports for itself.
+    if (!sameStringArray(syncedSpheres, spheres)) {
+      // These rows carry no `id`, so the conflict target must be the real
+      // unique key (user_id, name) or the write trips the unique index
+      // (23505) instead of updating.
       const { error } = await supabase.from('spheres').upsert(
         spheres.map((name, idx) => ({ user_id: userId, name, order: idx })),
         { onConflict: 'user_id,name' },
@@ -372,6 +506,26 @@ async function flushPending(): Promise<void> {
         console.warn('[supabase] spheres upsert error:', error.message);
       } else {
         syncedSpheres = [...spheres];
+      }
+    }
+    if (deletedSpheres.size > 0) {
+      // An upsert cannot express a deletion: a removed category is simply
+      // absent from the payload, so its row survives. Only an explicit DELETE
+      // removes it. The tombstone clears ONLY on a confirmed delete, so a
+      // dropped one is retried instead of silently losing the removal.
+      const names = [...deletedSpheres];
+      const { error: delErr } = await supabase
+        .from('spheres')
+        .delete()
+        .eq('user_id', userId)
+        .in('name', names);
+      if (delErr) {
+        console.warn('[supabase] spheres delete error:', delErr.message);
+      } else {
+        names.forEach((name) => deletedSpheres.delete(name));
+        // The server now holds exactly the local list.
+        syncedSpheres = [...spheres];
+        saveTombstones();
       }
     }
   } catch (e) {
@@ -449,7 +603,7 @@ const TASK_COLS =
 // Paging trades a few fast requests for one that never finishes.
 const TASK_PAGE = 25;
 
-async function fetchTasks(userId: string) {
+async function fetchTasks(userId: string, attempts = 6) {
   if (!supabase) return;
   const rows: any[] = [];
   for (let page = 0; page < 20; page++) {
@@ -463,6 +617,7 @@ async function fetchTasks(userId: string) {
         // would otherwise be skipped or duplicated.
         .order('id')
         .range(from, from + TASK_PAGE - 1),
+      attempts,
     );
     if (!chunk) return; // a page failed — keep whatever we already have
     rows.push(...(chunk as any[]));
@@ -474,10 +629,11 @@ async function fetchTasks(userId: string) {
   applyRemoteTasks(rows);
 }
 
-async function fetchSpheres(userId: string) {
+async function fetchSpheres(userId: string, attempts = 6) {
   if (!supabase) return;
   const data = await withRetry('spheres', () =>
     supabase!.from('spheres').select('*').eq('user_id', userId).order('order', { ascending: true }),
+    attempts,
   );
   if (!data) return;
   // Authoritative, but never let a truncated empty payload wipe the palette:
@@ -485,16 +641,26 @@ async function fetchSpheres(userId: string) {
   // is nothing local to lose.
   if (data.length === 0 && !sawRemoteSpheres && spheres.length > 0) return;
   if (data.length > 0) sawRemoteSpheres = true;
-  spheres = (data as any[]).map((r) => r.name);
+  const serverNames = (data as any[]).map((r) => r.name as string);
+  // Drop anything the user deleted that hasn't been confirmed server-side yet,
+  // or the fetch hands the category straight back (the resurrection bug).
+  spheres = serverNames.filter((name) => !deletedSpheres.has(name));
   snapshot.spheres = spheres;
-  syncedSpheres = [...spheres];
+  // The shadow records what the SERVER holds, tombstones included. Recording
+  // the filtered list instead would make local and shadow agree, so the
+  // pending delete would look already-synced and never be retried.
+  syncedSpheres = serverNames;
   localStorage.setItem(SPHERES_KEY, JSON.stringify(spheres));
+  // A delete still owed to the server keeps `hasPendingSync()` true; nudge a
+  // flush so it is retried now rather than on the next unrelated edit.
+  if (spheres.length !== serverNames.length) scheduleSync();
 }
 
-async function fetchJournal(userId: string) {
+async function fetchJournal(userId: string, attempts = 6) {
   if (!supabase) return;
   const data = await withRetry('journal', () =>
     supabase!.from('journal_entries').select('*').eq('user_id', userId),
+    attempts,
   );
   if (!data) return;
   const serverJournal: Record<string, string> = {};
@@ -509,6 +675,9 @@ async function fetchJournal(userId: string) {
   // set to the SERVER view below, so exactly those keys re-upload).
   let adopted = false;
   for (const [k, v] of Object.entries(serverJournal)) {
+    // Never re-adopt a key the user deleted and whose delete has not been
+    // confirmed yet — that is the resurrection bug.
+    if (deletedJournalKeys.has(k)) continue;
     if (!(k in journal)) {
       journal[k] = v;
       adopted = true;
@@ -525,7 +694,11 @@ async function fetchJournal(userId: string) {
   // upload would sit locally forever, only reaching the server the next time
   // the user happened to edit something.
   const diverged = Object.entries(journal).some(([k, v]) => serverJournal[k] !== v);
-  if (diverged) scheduleSync();
+  // A delete owed to the server leaves no key in `journal` to compare, so it
+  // needs its own nudge — otherwise a tombstoned entry waits for an unrelated
+  // edit before its DELETE is retried.
+  const staleDeletes = [...deletedJournalKeys].some((k) => k in serverJournal);
+  if (diverged || staleDeletes) scheduleSync();
 }
 
 async function fetchView(userId: string) {
@@ -613,6 +786,17 @@ export async function initSupabase(): Promise<void> {
     console.warn('[supabase] subscription error:', e);
   }
 
+  // Start the poll loop BEFORE the initial fetch.
+  //
+  // The initial load is a blocking chain of requests, and on this link a
+  // stalled socket can hold it for a long time (retries multiply the per-request
+  // deadline). Waiting for it before scheduling the timer meant that for the
+  // whole startup window the app neither polled nor received realtime — which is
+  // exactly when a phone edit is most likely to be missed. The pump starts here
+  // and the first poll simply races the initial fetch; whichever finishes fills
+  // the same state.
+  startPolling(user.id);
+
   // The four slices are independent, but they are fetched ONE AFTER ANOTHER.
   //
   // Firing them together starves them: the browser allows only ~6 connections
@@ -630,6 +814,72 @@ export async function initSupabase(): Promise<void> {
   listeners.forEach((l) => l());
 
   setupSyncEvents();
+}
+
+// Background polling: pull changes every few seconds so a device that is not
+// receiving realtime events still sees the other device's edits.
+//
+// Why this exists: realtime requires the four tables to be members of the
+// `supabase_realtime` publication (a one-line SQL command run once in
+// Supabase's SQL Editor). Until that is done the socket reports SUBSCRIBED but
+// delivers nothing, and without polling a change made on the phone would not
+// appear on the laptop until a manual refresh — the reported symptom.
+//
+// The guard matters as much as the timer: a poll issues several requests and a
+// stalled socket can hold one for seconds, so without the flag a slow poll
+// would overlap the next one and the requests would pile up, each starving the
+// others of the ~6 available connections.
+const POLL_MS = 2500;
+let pollingActive = false;
+let pollRunning = false;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+function startPolling(userId: string): void {
+  if (pollTimer) return;             // already polling
+  pollingActive = true;
+  pollTimer = setInterval(async () => {
+    if (!pollingActive || !isSupabaseAvailable || !supabase) return;
+    if (pollRunning) return;         // previous poll still in flight
+    if (syncPumpRunning) return;     // mid-write; don't fight the flush
+    // Something local is still owed to the server (a write or delete that
+    // failed earlier). Push that first and skip the pull this tick: pulling
+    // now would re-adopt the row we are trying to remove, and the write is the
+    // more urgent of the two. This is what makes a failed delete actually land
+    // instead of waiting for the user's next edit.
+    if (hasPendingSync()) {
+      void drainSync();
+      return;
+    }
+    pollRunning = true;
+    try {
+      // ONE attempt per slice: a poll runs every couple of seconds anyway, so
+      // in-poll retries only stack up delay and hold connection slots. Failing
+      // fast hands the slot back and the next tick tries again.
+      //
+      // Smallest slices first. Tasks are the heavy one (paged, ~14 KB a page
+      // against a link where a larger response often stalls until its
+      // deadline), so putting tasks first would delay the category palette and
+      // the journal behind it by a whole timeout. Categories and notes are a
+      // few kilobytes each and almost always land on the first try, so they go
+      // first and the visible board updates in a couple of seconds.
+      await fetchSpheres(userId, 1);
+      await fetchJournal(userId, 1);
+      await fetchTasks(userId, 1);
+      listeners.forEach((l) => l());
+    } catch {
+      // Network error or timeout; the next tick retries.
+    } finally {
+      pollRunning = false;
+    }
+  }, POLL_MS);
+  // Exposed so a test (or a future settings toggle) can stop the loop.
+  if (typeof window !== 'undefined') {
+    (window as any).__stopPolling = () => {
+      pollingActive = false;
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = null;
+    };
+  }
 }
 
 const PRIORITY_WEIGHT: Record<string, number> = { high: 0, normal: 1, low: 2 };
@@ -839,6 +1089,10 @@ export const store = {
     const newTopics = { ...topics };
     delete newTopics[name];
     topics = newTopics;
+    // Guard the row against being re-adopted by an in-flight fetch before the
+    // DELETE lands — otherwise the category reappears on the next load.
+    deletedSpheres.add(name);
+    saveTombstones();
     emit();
   },
   reorderSpheres(ordered: string[]) {
@@ -908,9 +1162,15 @@ export const store = {
     const trimmed = text.trim();
     if (trimmed) {
       journal[dateKey] = trimmed;
+      // If this key was previously deleted-and-unconfirmed, the rewrite
+      // supersedes the pending delete.
+      deletedJournalKeys.delete(dateKey);
     } else {
       delete journal[dateKey];
+      // Clearing the field IS a deletion; guard it the same way.
+      deletedJournalKeys.add(dateKey);
     }
+    saveTombstones();
     snapshot.journal = journal;
     localStorage.setItem(JOURNAL_KEY, JSON.stringify(journal));
     scheduleSync();
@@ -925,6 +1185,10 @@ export const store = {
   },
   deleteJournalEntry(dateKey: string) {
     delete journal[dateKey];
+    // Hold the key against re-adoption until the DELETE is confirmed, or the
+    // entry the user just removed reappears on the next reload.
+    deletedJournalKeys.add(dateKey);
+    saveTombstones();
     snapshot.journal = journal;
     localStorage.setItem(JOURNAL_KEY, JSON.stringify(journal));
     scheduleSync();
