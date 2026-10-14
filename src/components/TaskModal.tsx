@@ -4,7 +4,7 @@ import { store, useSpheres } from '../store';
 import { DatePickerModal } from './DatePickerModal';
 import { fmt } from '../utils/date';
 import { parseISO } from 'date-fns';
-import { getColors, renameColor, removeColor, NO_COLOR } from '../config/colors';
+import { getColors, renameColor, removeColor, reorderColors, NO_COLOR } from '../config/colors';
 
 const PRIORITY_ORDER: Priority[] = ['low', 'normal', 'high'];
 const PRIORITY_LABEL: Record<Priority, string> = { low: 'низкий', normal: 'обычный', high: 'высокий' };
@@ -119,6 +119,9 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
   const [newSphere, setNewSphere] = useState('');
   const [, setColorRefresh] = useState(0);
   const [editingLabel, setEditingLabel] = useState<string | null>(null);
+  const [dragColor, setDragColor] = useState<string | null>(null);
+  const [overColor, setOverColor] = useState<string | null>(null);
+  const [overPosition, setOverPosition] = useState<'above' | 'below' | null>(null);
   const labelInputRef = useRef<HTMLInputElement>(null);
   const newSubtaskRef = useRef<HTMLInputElement>(null);
   const toolsRef = useRef<HTMLDivElement>(null);
@@ -345,9 +348,16 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
                   ))}
                   <div className="pop-sep" />
                   <div className="pop-input-row">
-                    <input type="number" min="0" placeholder="своё число дней"
-                      value={REMINDER_OPTIONS.some((o) => o.value === reminderDays) ? '' : String(reminderDays ?? '')}
-                      onChange={(e) => setReminderDays(e.target.value === '' ? null : Number(e.target.value))} />
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="своё число дней"
+                      value={reminderDays ?? ''}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setReminderDays(val === '' ? null : Number(val));
+                      }}
+                    />
                   </div>
                 </div>
               )}
@@ -452,58 +462,114 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
                     title={NO_COLOR.label}
                   />
                   <div className="pop-sep" />
-                  {getColors().map((c) => (
-                    <div key={c.value} className="color-row">
-                      <button
-                        className={`color-swatch-btn ${color === c.value ? 'selected' : ''}`}
-                        onClick={() => {
-                          const isUnnamed = !c.label || c.unnamed;
-                          if (!isUnnamed) { setColor(c.value); setOpen(null); }
-                          else setEditingLabel(c.value);
+                  {getColors().map((c) => {
+                    const isOver = overColor === c.value;
+                    const isDragging = dragColor === c.value;
+                    return (
+                      <div
+                        key={c.value}
+                        className={`color-row ${isDragging ? 'dragging' : ''} ${isOver ? (overPosition === 'above' ? 'drop-above' : 'drop-below') : ''}`}
+                        draggable={editingLabel !== c.value}
+                        onDragStart={(e) => {
+                          e.stopPropagation();
+                          e.dataTransfer.effectAllowed = 'move';
+                          e.dataTransfer.setData('text/plain', c.value);
+                          setDragColor(c.value);
                         }}
-                        title={c.label || 'Нажмите чтобы задать имя'}
-                        style={{
-                          background: c.value,
-                          borderColor: color === c.value ? 'var(--ink)' : (!c.label || c.unnamed) ? 'var(--muted)' : 'transparent',
-                          opacity: (!c.label || c.unnamed) ? 0.5 : 1,
+                        onDragEnd={() => {
+                          setDragColor(null);
+                          setOverColor(null);
+                          setOverPosition(null);
+                        }}
+                        onDragOver={(e) => {
+                          if (!dragColor || dragColor === c.value) return;
+                          e.preventDefault();
+                          e.stopPropagation();
+                          e.dataTransfer.dropEffect = 'move';
+                          const r = e.currentTarget.getBoundingClientRect();
+                          const pos = e.clientY < r.top + r.height / 2 ? 'above' : 'below';
+                          setOverColor(c.value);
+                          setOverPosition(pos);
+                        }}
+                        onDragLeave={(e) => {
+                          const r = e.currentTarget.getBoundingClientRect();
+                          const { clientX: x, clientY: y } = e;
+                          if (x < r.left || x >= r.right || y < r.top || y >= r.bottom) {
+                            if (overColor === c.value) {
+                              setOverColor(null);
+                              setOverPosition(null);
+                            }
+                          }
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          if (!dragColor || dragColor === c.value) return;
+                          const r = e.currentTarget.getBoundingClientRect();
+                          const place = e.clientY < r.top + r.height / 2 ? 'above' : 'below';
+                          const colorsList = getColors().map((item) => item.value);
+                          const filtered = colorsList.filter((val) => val !== dragColor);
+                          let at = filtered.indexOf(c.value);
+                          if (at < 0) at = filtered.length;
+                          else if (place === 'below') at += 1;
+                          filtered.splice(at, 0, dragColor);
+                          reorderColors(filtered);
+                          setDragColor(null);
+                          setOverColor(null);
+                          setOverPosition(null);
                         }}
                       >
-                        {color === c.value && <span className="color-check">✓</span>}
-                      </button>
-                      {editingLabel === c.value ? (
-                        <input
-                          ref={labelInputRef}
-                          className="color-label-edit"
-                          defaultValue={c.label}
-                          autoFocus
-                          onBlur={(e) => {
-                            const v = e.target.value.trim();
-                            if (v) renameColor(c.value, v);
-                            setEditingLabel(null);
+                        <button
+                          className={`color-swatch-btn ${color === c.value ? 'selected' : ''}`}
+                          onClick={() => {
+                            const isUnnamed = !c.label || c.unnamed;
+                            if (!isUnnamed) { setColor(c.value); setOpen(null); }
+                            else setEditingLabel(c.value);
                           }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') { e.currentTarget.blur(); }
-                            if (e.key === 'Escape') { setEditingLabel(null); }
-                          }}
-                        />
-                      ) : (
-                        <span
-                          className={`color-label ${(!c.label || c.unnamed) ? 'unnamed' : ''}`}
                           title={c.label || 'Нажмите чтобы задать имя'}
-                          onClick={() => setEditingLabel(c.value)}
-                        >{c.label || '…'}</span>
-                      )}
-                      {/* Deactivate: clears the name and disables the color.
-                          Re-naming it (click the label) makes it usable again. */}
-                      <button
-                        type="button"
-                        className="color-row-del"
-                        title="Убрать название (цвет станет недоступен)"
-                        aria-label="Убрать название цвета"
-                        onClick={(e) => { e.stopPropagation(); removeColor(c.value); }}
-                      >✕</button>
-                    </div>
-                  ))}
+                          style={{
+                            background: c.value,
+                            borderColor: color === c.value ? 'var(--ink)' : (!c.label || c.unnamed) ? 'var(--muted)' : 'transparent',
+                            opacity: (!c.label || c.unnamed) ? 0.5 : 1,
+                          }}
+                        >
+                          {color === c.value && <span className="color-check">✓</span>}
+                        </button>
+                        {editingLabel === c.value ? (
+                          <input
+                            ref={labelInputRef}
+                            className="color-label-edit"
+                            defaultValue={c.label}
+                            autoFocus
+                            onBlur={(e) => {
+                              const v = e.target.value.trim();
+                              renameColor(c.value, v);
+                              setEditingLabel(null);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') { e.currentTarget.blur(); }
+                              if (e.key === 'Escape') { setEditingLabel(null); }
+                            }}
+                          />
+                        ) : (
+                          <span
+                            className={`color-label ${(!c.label || c.unnamed) ? 'unnamed' : ''}`}
+                            title={c.label || 'Нажмите чтобы задать имя'}
+                            onClick={() => setEditingLabel(c.value)}
+                          >{c.label || '…'}</span>
+                        )}
+                        {/* Deactivate: clears the name and disables the color.
+                            Re-naming it (click the label) makes it usable again. */}
+                        <button
+                          type="button"
+                          className="color-row-del"
+                          title="Убрать название (цвет станет недоступен)"
+                          aria-label="Убрать название цвета"
+                          onClick={(e) => { e.stopPropagation(); removeColor(c.value); }}
+                        >✕</button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

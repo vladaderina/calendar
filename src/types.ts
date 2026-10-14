@@ -1,10 +1,6 @@
 export type Sphere = string;
 
-export const DEFAULT_SPHERES: string[] = [
-  'ИЗУЧЕНИЕ', 'ТВОРЧЕСТВО', 'ОТДЫХ/РАЗВЛЕЧЕНИЯ', 'ДУХОВНОСТЬ',
-  'ПУТЕШЕСТВИЯ', 'ОТНОШЕНИЯ', 'ЗДОРОВЬЕ', 'КАРЬЕРА',
-  'ЦИФРА', 'КОНТЕНТ', 'БЫТ', 'СОЦИУМ', 'РАЗНОЕ',
-];
+export const DEFAULT_SPHERES: string[] = [];
 
 // Recurrence: built-in presets + two free-form modes.
 //  - "weekdays"  → repeats on the weekdays listed in `recurrenceDays` (1=Mon..7=Sun)

@@ -4,11 +4,15 @@ import type { Task } from './types';
 import { DEFAULT_SPHERES, DEFAULT_TOPIC } from './types';
 import { supabase, isSupabaseAvailable, toTaskRow, fromTaskRow } from './lib/supabase';
 import { initAuth, getUserId } from './lib/auth';
+import { getColors, saveColors, type TaskColor } from './config/colors';
 
 const TASKS_KEY = 'calendar.tasks.v1';
 const SPHERES_KEY = 'calendar.spheres.v1';
 const TOPICS_KEY = 'calendar.topics.v1';
 const JOURNAL_KEY = 'calendar.journal.v1';
+try {
+  localStorage.removeItem(JOURNAL_KEY);
+} catch {}
 const VIEW_KEY = 'calendar.view.v1';
 // Deletion tombstones: a delete that has not been confirmed by the server yet
 // must survive a page reload, or reloading while a delete is in flight brings
@@ -44,11 +48,7 @@ function loadTopics(): Record<string, string[]> {
   }
 }
 function loadJournal(): Record<string, string> {
-  try {
-    return JSON.parse(localStorage.getItem(JOURNAL_KEY) || '{}');
-  } catch {
-    return {};
-  }
+  return {};
 }
 function loadView(): string {
   try {
@@ -224,6 +224,12 @@ const taskDeleteQueue = new Set<string>();
 let syncedJournal: Record<string, string> | null = null;
 let syncedSpheres: string[] | null = null;
 let syncedView: string | null = null;
+let syncedColorsJson: string | null = null;
+
+function sameColors(a: string | null, b: string): boolean {
+  if (a === null) return false;
+  return a === b;
+}
 
 // ── Deletion tombstones ──────────────────────────────────────────────────
 // A pending deletion must survive a fetch that still sees the row.
@@ -318,6 +324,7 @@ function sameStringArray(a: string[] | null, b: string[]): boolean {
 }
 
 function hasPendingSync(): boolean {
+  const currentColorsJson = JSON.stringify(getColors());
   return (
     taskPutQueue.size > 0 ||
     taskDeleteQueue.size > 0 ||
@@ -325,13 +332,15 @@ function hasPendingSync(): boolean {
     !sameStringArray(syncedSpheres, spheres) ||
     deletedJournalKeys.size > 0 ||
     deletedSpheres.size > 0 ||
-    syncedView !== lastView
+    syncedView !== lastView ||
+    !sameColors(syncedColorsJson, currentColorsJson)
   );
 }
 
 // A cheap fingerprint of "what is still owed to the server". Two consecutive
 // identical fingerprints across a flush mean no progress was made.
 function pendingSignature(): string {
+  const currentColorsJson = JSON.stringify(getColors());
   return [
     taskPutQueue.size,
     taskDeleteQueue.size,
@@ -340,6 +349,7 @@ function pendingSignature(): string {
     deletedJournalKeys.size,
     deletedSpheres.size,
     syncedView === lastView ? 0 : 1,
+    sameColors(syncedColorsJson, currentColorsJson) ? 0 : 1,
   ].join('|');
 }
 
@@ -420,67 +430,9 @@ async function flushPending(): Promise<void> {
     deletes.forEach((id) => taskDeleteQueue.add(id));
     console.warn('[supabase] sync tasks error:', e);
   }
-  // ── Journal: only entries whose text actually changed ─────────────────
+  // ── Journal: disabled/removed ─────────────────────────────────────────
   try {
-    const shadow = syncedJournal ?? {};
-    const changed = Object.entries(journal).filter(([k, v]) => shadow[k] !== v);
-    // What has to be deleted: keys the server held that we no longer do, PLUS
-    // every tombstone. Deriving this from `shadow` alone is not enough —
-    // `syncedJournal` is still null until the first successful journal fetch,
-    // and on a flaky connection that can be indefinitely. A note cleared in
-    // that window would compute `removed` as empty, so its DELETE would never
-    // run, the row would stay on the server, and the next successful fetch
-    // would hand the note straight back: the "my note keeps coming back"
-    // complaint. The tombstones are the durable record of intent.
-    const removed = [
-      ...new Set([
-        ...Object.keys(shadow).filter((k) => !(k in journal)),
-        ...deletedJournalKeys,
-      ]),
-    ];
-    let ok = true;
-    if (changed.length > 0) {
-      // onConflict is REQUIRED here. These rows carry no `id`, so PostgREST
-      // would default the conflict target to the primary key, which never
-      // matches — the INSERT then trips the unique index (user_id, date_key)
-      // with a 23505 and the whole write is rejected. Naming the real unique
-      // key turns it into a genuine upsert.
-      const { error } = await supabase.from('journal_entries').upsert(
-        changed.map(([dateKey, text]) => ({
-          user_id: userId,
-          date_key: dateKey,
-          text,
-          updated_at: new Date().toISOString(),
-        })),
-        { onConflict: 'user_id,date_key' },
-      );
-      if (error) {
-        console.warn('[supabase] journal upsert error:', error.message);
-        ok = false;
-      }
-    }
-    if (removed.length > 0) {
-      // The delete is NOT gated on the upsert above. Nesting it meant a slow or
-      // failed upsert skipped the delete, leaving the row on the server for the
-      // next fetch to resurrect — the cleared note that kept coming back.
-      // A delete must also be CONFIRMED before its tombstone is dropped.
-      const { error } = await supabase
-        .from('journal_entries')
-        .delete()
-        .eq('user_id', userId)
-        .in('date_key', removed);
-      if (error) {
-        console.warn('[supabase] journal delete error:', error.message);
-        ok = false;
-      } else {
-        // Confirmed gone — stop guarding it against re-adoption.
-        removed.forEach((k) => deletedJournalKeys.delete(k));
-        saveTombstones();
-      }
-    }
-    // Advance the diff baseline only when every write landed; otherwise the
-    // change stays pending and the next flush retries it.
-    if (ok) syncedJournal = { ...journal };
+    syncedJournal = {};
   } catch (e) {
     console.warn('[supabase] sync journal error:', e);
   }
@@ -532,16 +484,20 @@ async function flushPending(): Promise<void> {
     console.warn('[supabase] sync spheres error:', e);
   }
 
-  // ── View state ────────────────────────────────────────────────────────
+  // ── View state & Color settings ──────────────────────────────────────
   try {
-    if (syncedView !== lastView) {
+    const currentColorsJson = JSON.stringify(getColors());
+    if (syncedView !== lastView || !sameColors(syncedColorsJson, currentColorsJson)) {
+      // Pack colors into last_view: "week|colorsJson" or "view" if no colors
+      const storedSetting = `${lastView}#colors:${currentColorsJson}`;
       const { error } = await supabase
         .from('user_settings')
-        .upsert({ user_id: userId, last_view: lastView });
+        .upsert({ user_id: userId, last_view: storedSetting });
       if (error) {
-        console.warn('[supabase] sync view error:', error.message);
+        console.warn('[supabase] sync view/colors error:', error.message);
       } else {
         syncedView = lastView;
+        syncedColorsJson = currentColorsJson;
       }
     }
   } catch (e) {
@@ -557,12 +513,20 @@ export function resetSyncShadows() {
   syncedJournal = null;
   syncedSpheres = null;
   syncedView = null;
+  syncedColorsJson = null;
   taskPutQueue.clear();
   taskDeleteQueue.clear();
 }
 
 // ── Initialise Supabase (auth + realtime + initial load) ────────────────
-export { initAuth, getCurrentUser, signOut, isAnonymous, type AuthResult } from './lib/auth';
+export { initAuth, getCurrentUser, signOut, type AuthResult } from './lib/auth';
+
+// Listen to local color changes to sync to server
+if (typeof window !== 'undefined') {
+  window.addEventListener('colors-sync-request', () => {
+    scheduleSync();
+  });
+}
 
 // Load one remote slice. Each loader is independent, so they run together
 // instead of queueing up one after another — on a slow link the four
@@ -656,49 +620,8 @@ async function fetchSpheres(userId: string, attempts = 6) {
   if (spheres.length !== serverNames.length) scheduleSync();
 }
 
-async function fetchJournal(userId: string, attempts = 6) {
-  if (!supabase) return;
-  const data = await withRetry('journal', () =>
-    supabase!.from('journal_entries').select('*').eq('user_id', userId),
-    attempts,
-  );
-  if (!data) return;
-  const serverJournal: Record<string, string> = {};
-  for (const row of data as any[]) serverJournal[row.date_key] = row.text;
-
-  // Merge with LOCAL WINNING for keys we already hold.
-  //
-  // Rationale: an entry that failed to upload lives only on this device. If the
-  // server copy won, the user's own writing would be deleted by a mere page
-  // load. Keys the server has and we do not are adopted; for a key both sides
-  // have we keep ours and let the journal diff push it up (syncedJournal is
-  // set to the SERVER view below, so exactly those keys re-upload).
-  let adopted = false;
-  for (const [k, v] of Object.entries(serverJournal)) {
-    // Never re-adopt a key the user deleted and whose delete has not been
-    // confirmed yet — that is the resurrection bug.
-    if (deletedJournalKeys.has(k)) continue;
-    if (!(k in journal)) {
-      journal[k] = v;
-      adopted = true;
-    }
-  }
-  if (adopted) {
-    snapshot.journal = journal;
-    localStorage.setItem(JOURNAL_KEY, JSON.stringify(journal));
-  }
-  syncedJournal = serverJournal;
-
-  // If we still hold an entry the server does not have (or a newer value for
-  // one), push it up now. Without this, a journal entry that lost its first
-  // upload would sit locally forever, only reaching the server the next time
-  // the user happened to edit something.
-  const diverged = Object.entries(journal).some(([k, v]) => serverJournal[k] !== v);
-  // A delete owed to the server leaves no key in `journal` to compare, so it
-  // needs its own nudge — otherwise a tombstoned entry waits for an unrelated
-  // edit before its DELETE is retried.
-  const staleDeletes = [...deletedJournalKeys].some((k) => k in serverJournal);
-  if (diverged || staleDeletes) scheduleSync();
+async function fetchJournal(_userId: string, _attempts = 6) {
+  return;
 }
 
 async function fetchView(userId: string) {
@@ -709,7 +632,23 @@ async function fetchView(userId: string) {
     supabase!.from('user_settings').select('last_view').eq('user_id', userId).maybeSingle(),
   );
   if (!data?.last_view) return;
-  lastView = data.last_view;
+  let remoteView = data.last_view;
+  if (remoteView.includes('#colors:')) {
+    const [vPart, colorsPart] = remoteView.split('#colors:');
+    remoteView = vPart;
+    if (colorsPart) {
+      try {
+        const parsedColors: TaskColor[] = JSON.parse(colorsPart);
+        if (Array.isArray(parsedColors) && parsedColors.length > 0) {
+          saveColors(parsedColors, false);
+          syncedColorsJson = colorsPart;
+        }
+      } catch {
+        // ignore parse error
+      }
+    }
+  }
+  lastView = remoteView;
   snapshot.lastView = lastView;
   syncedView = lastView;
   localStorage.setItem(VIEW_KEY, lastView);
@@ -749,25 +688,6 @@ function subscribeRealtime(userId: string) {
       'postgres_changes',
       { event: '*', schema: 'public', table: 'spheres', filter: `user_id=eq.${userId}` },
       () => { void fetchSpheres(userId).then(() => listeners.forEach((l) => l())); },
-    )
-    .subscribe();
-
-  supabase
-    .channel(`public:journal_entries:user_id=eq.${userId}`)
-    .on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table: 'journal_entries', filter: `user_id=eq.${userId}` },
-      (payload: any) => {
-        if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-          journal[payload.new.date_key] = payload.new.text;
-        } else if (payload.eventType === 'DELETE' && payload.old) {
-          delete journal[payload.old.date_key];
-        }
-        snapshot.journal = journal;
-        syncedJournal = { ...journal };
-        localStorage.setItem(JOURNAL_KEY, JSON.stringify(journal));
-        listeners.forEach((l) => l());
-      },
     )
     .subscribe();
 }
@@ -864,6 +784,7 @@ function startPolling(userId: string): void {
       // first and the visible board updates in a couple of seconds.
       await fetchSpheres(userId, 1);
       await fetchJournal(userId, 1);
+      await fetchView(userId);
       await fetchTasks(userId, 1);
       listeners.forEach((l) => l());
     } catch {
@@ -1158,41 +1079,14 @@ export const store = {
     return tasks.find((t) => t.id === id);
   },
   // ── Journal ──────────────────────────────────────────────────────
-  saveJournalEntry(dateKey: string, text: string) {
-    const trimmed = text.trim();
-    if (trimmed) {
-      journal[dateKey] = trimmed;
-      // If this key was previously deleted-and-unconfirmed, the rewrite
-      // supersedes the pending delete.
-      deletedJournalKeys.delete(dateKey);
-    } else {
-      delete journal[dateKey];
-      // Clearing the field IS a deletion; guard it the same way.
-      deletedJournalKeys.add(dateKey);
-    }
-    saveTombstones();
-    snapshot.journal = journal;
-    localStorage.setItem(JOURNAL_KEY, JSON.stringify(journal));
-    scheduleSync();
-    listeners.forEach((l) => l());
+  saveJournalEntry(_dateKey: string, _text: string) {
+    // No-op: journal removed
   },
-  saveJournalAll(data: Record<string, string>) {
-    journal = data;
-    snapshot.journal = journal;
-    localStorage.setItem(JOURNAL_KEY, JSON.stringify(journal));
-    scheduleSync();
-    listeners.forEach((l) => l());
+  saveJournalAll(_data: Record<string, string>) {
+    // No-op: journal removed
   },
-  deleteJournalEntry(dateKey: string) {
-    delete journal[dateKey];
-    // Hold the key against re-adoption until the DELETE is confirmed, or the
-    // entry the user just removed reappears on the next reload.
-    deletedJournalKeys.add(dateKey);
-    saveTombstones();
-    snapshot.journal = journal;
-    localStorage.setItem(JOURNAL_KEY, JSON.stringify(journal));
-    scheduleSync();
-    listeners.forEach((l) => l());
+  deleteJournalEntry(_dateKey: string) {
+    // No-op: journal removed
   },
   removeSubtask(parentId: string, subtaskId: string) {
     const parent = tasks.find((t) => t.id === parentId);

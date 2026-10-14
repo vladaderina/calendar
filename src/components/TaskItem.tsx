@@ -110,6 +110,10 @@ export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props)
   const longPressTimer = useRef<number | null>(null);
   const didLongPress = useRef(false);
 
+  const [touchDragging, setTouchDragging] = useState(false);
+  const touchStartPos = useRef<{ x: number; y: number } | null>(null);
+  const touchTargetTask = useRef<{ id: string; place: 'above' | 'below' } | null>(null);
+
   const done = date ? isDoneOn(task, date) : task.completed;
 
   const cancelLongPress = () => {
@@ -119,14 +123,71 @@ export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props)
     }
   };
 
-  const startLongPress = () => {
-    if (!onEdit) return;
-    didLongPress.current = false;
+  const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (!onReorder) return;
+    const touch = e.touches[0];
+    touchStartPos.current = { x: touch.clientX, y: touch.clientY };
     cancelLongPress();
     longPressTimer.current = window.setTimeout(() => {
-      didLongPress.current = true;
-      onEdit();
-    }, 500);
+      // Long press triggers drag mode instead of editor on mobile!
+      setTouchDragging(true);
+      if (navigator.vibrate) navigator.vibrate(40);
+    }, 300);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    const touch = e.touches[0];
+    if (!touchDragging) {
+      // If moved more than 8px before timer fires, cancel drag initiation so page scrolls
+      if (touchStartPos.current) {
+        const dx = Math.abs(touch.clientX - touchStartPos.current.x);
+        const dy = Math.abs(touch.clientY - touchStartPos.current.y);
+        if (dx > 8 || dy > 8) {
+          cancelLongPress();
+        }
+      }
+      return;
+    }
+
+    // Touch dragging is active: prevent scrolling
+    e.preventDefault();
+
+    // Find task under finger
+    const el = document.elementFromPoint(touch.clientX, touch.clientY);
+    const taskEl = el?.closest('.task[data-task-id]') as HTMLElement | null;
+    if (taskEl) {
+      const targetId = taskEl.getAttribute('data-task-id');
+      if (targetId && targetId !== task.id) {
+        const r = taskEl.getBoundingClientRect();
+        const place = touch.clientY < r.top + r.height / 2 ? 'above' : 'below';
+        touchTargetTask.current = { id: targetId, place };
+        document.querySelectorAll('.task.drop-top, .task.drop-bottom').forEach((node) => {
+          node.classList.remove('drop-top', 'drop-bottom');
+        });
+        taskEl.classList.add(place === 'above' ? 'drop-top' : 'drop-bottom');
+        return;
+      }
+    }
+    // Clear drop indicator if outside
+    document.querySelectorAll('.task.drop-top, .task.drop-bottom').forEach((node) => {
+      node.classList.remove('drop-top', 'drop-bottom');
+    });
+    touchTargetTask.current = null;
+  };
+
+  const handleTouchEnd = () => {
+    cancelLongPress();
+    if (touchDragging) {
+      setTouchDragging(false);
+      document.querySelectorAll('.task.drop-top, .task.drop-bottom').forEach((node) => {
+        node.classList.remove('drop-top', 'drop-bottom');
+      });
+      if (touchTargetTask.current && onReorder) {
+        const { id: targetId, place } = touchTargetTask.current;
+        onReorder(task.id, targetId, place);
+      }
+      touchTargetTask.current = null;
+    }
   };
 
   const cls = [
@@ -135,6 +196,7 @@ export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props)
     done && 'completed',
     task.unplanned && !done && 'unplanned',
     over && `drop-${over}`,
+    touchDragging && 'touch-dragging',
   ]
     .filter(Boolean)
     .join(' ');
@@ -186,10 +248,11 @@ export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props)
         e.stopPropagation();
         onEdit?.();
       }}
-      onTouchStart={startLongPress}
-      onTouchEnd={cancelLongPress}
-      onTouchMove={cancelLongPress}
-      onTouchCancel={cancelLongPress}
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
+      onTouchMove={handleTouchMove}
+      onTouchCancel={handleTouchEnd}
+      data-task-id={task.id}
       draggable
       onDragStart={(e) => {
         e.stopPropagation();

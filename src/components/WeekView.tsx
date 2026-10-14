@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useRef, useEffect } from 'react';
 import type { Task } from '../types';
 import { TaskItem } from './TaskItem';
 import { fmt, weekDays, taskOnDate, daysUntil, sortByPriority, nextOccurrence } from '../utils/date';
@@ -60,13 +60,20 @@ function QuickAdd({ defaults, onDone }: { defaults: Partial<Task>; onDone: () =>
     </div>
   );
 }
-import { useRef } from 'react';
 
 export function WeekView({ anchor, onEdit, onPickDate }: Props) {
   const tasks = useTasks();
   const days = weekDays(anchor);
   const today = new Date();
   const [adding, setAdding] = useState<string | null>(null);
+  const todayCellRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // On small screens, scroll today's cell into view on load
+    if (window.innerWidth <= 720 && todayCellRef.current) {
+      todayCellRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, []);
 
   // Day-cell tasks: dated tasks that are PROMOTED (unplanned=false), i.e.
   // scheduled straight onto a day. Tasks still tagged "ДРУГОЕ" (unplanned=true)
@@ -180,7 +187,7 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
     const dayTasks = tasksByDay.get(iso) ?? [];
     const isToday = isSameDay(d, today);
     return (
-      <div className="cell" key={iso}>
+      <div className="cell" key={iso} ref={isToday ? todayCellRef : undefined}>
         <div className={`cell-header ${isToday ? 'today' : ''}`} onClick={() => onPickDate?.(d)}>
           <span className={`cell-date-block ${isToday ? 'today' : ''}`}>
             <span className="cell-date-main">{fmt.dayShort(d)}</span>

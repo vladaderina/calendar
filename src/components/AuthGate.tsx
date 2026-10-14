@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
-import { initAuth, onAuthChange } from '../lib/auth';
+import { initAuth, onAuthChange, signInWithPassword, signUpWithPassword } from '../lib/auth';
 
 interface AuthGateProps {
   onUserLoaded: (user: User | null) => void;
@@ -12,14 +12,12 @@ export function AuthGate({ onUserLoaded, children }: AuthGateProps) {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    // Step 1: Restore session from storage (or fall back to fixed UUID).
     void initAuth().then((u) => {
       setUser(u);
       setLoaded(true);
       onUserLoaded(u);
     });
 
-    // Step 2: Listen for any changes (cross-tab sign-out, token refresh, etc).
     const unsubscribe = onAuthChange((u) => {
       setUser(u);
       onUserLoaded(u);
@@ -27,32 +25,22 @@ export function AuthGate({ onUserLoaded, children }: AuthGateProps) {
     return unsubscribe;
   }, [onUserLoaded]);
 
-  // First render: still waiting for the session restore from storage.
   if (!loaded) {
     return (
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          width: '100vw',
-          height: '100vh',
-          background: '#f5f5f5',
-          fontSize: '14px',
-          color: '#666',
-        }}
-      >
-        Загрузка...
+      <div style={loadingContainerStyle}>
+        <div style={spinnerStyle} />
       </div>
     );
   }
 
-  // Session exists → show the app.
   if (user) {
-    return <>{children}</>;
+    return (
+      <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+        {children}
+      </div>
+    );
   }
 
-  // No session → show sign-in/sign-up screens.
   return <AuthForm />;
 }
 
@@ -63,216 +51,235 @@ function AuthForm() {
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSignIn = async () => {
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !password) return;
     setLoading(true);
     setMessage('');
-    const result = await (
-      tab === 'signin'
-        ? (await import('../lib/auth')).signInWithPassword(email, password)
-        : (await import('../lib/auth')).signUpWithPassword(email, password)
-    );
-    setLoading(false);
-    if (!result.ok) setMessage(result.message);
-    // On success, onAuthChange fires and the gate re-renders.
-  };
 
-  const handleAnon = async () => {
-    setLoading(true);
-    setMessage('');
-    const result = await (await import('../lib/auth')).signInAnonymously();
-    setLoading(false);
-    if (!result.ok) setMessage(result.message);
-  };
+    const result = tab === 'signin'
+      ? await signInWithPassword(email, password)
+      : await signUpWithPassword(email, password);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') handleSignIn();
+    setLoading(false);
+    if (!result.ok) {
+      setMessage(result.message);
+    }
   };
 
   return (
-    <div style={authFormContainerStyle}>
-      <div style={authFormStyle}>
-        <h1 style={titleStyle}>Календарь</h1>
+    <div style={containerStyle}>
+      <div style={cardStyle}>
+        <div style={headerStyle}>
+          <h1 style={titleStyle}>Календарь</h1>
+          <p style={subtitleStyle}>
+            {tab === 'signin' ? 'Войдите в свой аккаунт' : 'Создайте новый аккаунт'}
+          </p>
+        </div>
 
-        {/* Tabs */}
         <div style={tabsStyle}>
           <button
-            onClick={() => setTab('signin')}
+            type="button"
+            onClick={() => { setTab('signin'); setMessage(''); }}
             style={{
-              ...tabButtonStyle,
-              background: tab === 'signin' ? '#0066cc' : '#f0f0f0',
-              color: tab === 'signin' ? 'white' : '#333',
+              ...tabStyle,
+              borderBottom: tab === 'signin' ? '2px solid #111' : '2px solid transparent',
+              color: tab === 'signin' ? '#111' : '#666',
+              fontWeight: tab === 'signin' ? 600 : 400,
             }}
           >
             Вход
           </button>
           <button
-            onClick={() => setTab('signup')}
+            type="button"
+            onClick={() => { setTab('signup'); setMessage(''); }}
             style={{
-              ...tabButtonStyle,
-              background: tab === 'signup' ? '#0066cc' : '#f0f0f0',
-              color: tab === 'signup' ? 'white' : '#333',
+              ...tabStyle,
+              borderBottom: tab === 'signup' ? '2px solid #111' : '2px solid transparent',
+              color: tab === 'signup' ? '#111' : '#666',
+              fontWeight: tab === 'signup' ? 600 : 400,
             }}
           >
             Регистрация
           </button>
         </div>
 
-        {/* Form */}
-        <div style={formStyle}>
-          <input
-            type="email"
-            placeholder="Email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={loading}
-            style={inputStyle}
-            autoCapitalize="off"
-            autoCorrect="off"
-          />
-          <input
-            type="password"
-            placeholder="Пароль"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={loading}
-            style={inputStyle}
-          />
-          {message && <div style={messageStyle}>{message}</div>}
+        <form onSubmit={handleSubmit} style={formStyle}>
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Email</label>
+            <input
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="name@example.com"
+              style={inputStyle}
+              disabled={loading}
+              autoComplete="email"
+            />
+          </div>
+
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Пароль</label>
+            <input
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              style={inputStyle}
+              disabled={loading}
+              autoComplete={tab === 'signin' ? 'current-password' : 'new-password'}
+            />
+          </div>
+
+          {message && (
+            <div style={{
+              ...messageStyle,
+              background: message.startsWith('Готово') ? '#e6f4ea' : '#fce8e6',
+              color: message.startsWith('Готово') ? '#137333' : '#c5221f',
+            }}>
+              {message}
+            </div>
+          )}
+
           <button
-            onClick={handleSignIn}
+            type="submit"
             disabled={loading || !email || !password}
-            style={{ ...buttonStyle, opacity: loading || !email || !password ? 0.5 : 1 }}
+            style={{
+              ...submitBtnStyle,
+              opacity: loading || !email || !password ? 0.6 : 1,
+            }}
           >
-            {loading ? 'Загрузка...' : tab === 'signin' ? 'Войти' : 'Создать аккаунт'}
+            {loading ? 'Загрузка...' : tab === 'signin' ? 'Войти' : 'Зарегистрироваться'}
           </button>
-        </div>
-
-        {/* Divider */}
-        <div style={dividerStyle}>или</div>
-
-        {/* Anonymous */}
-        <button
-            onClick={handleAnon}
-            disabled={loading}
-            style={{ ...secondaryButtonStyle, opacity: loading ? 0.5 : 1 }}
-          >
-            Войти анонимно
-          </button>
-          <p style={smallTextStyle}>
-            Без аккаунта данные хранятся локально и не синхронизируются между устройствами.
-          </p>
+        </form>
       </div>
     </div>
   );
 }
 
-// ── Styles ─────────────────────────────────────────────────────────────
-const authFormContainerStyle: React.CSSProperties = {
+// Minimalist styling matching existing UI tone
+const loadingContainerStyle: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
   width: '100vw',
   height: '100vh',
-  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+  background: '#fcfcfc',
   fontFamily: 'system-ui, -apple-system, sans-serif',
-  margin: 0,
-  padding: 0,
 };
 
-const authFormStyle: React.CSSProperties = {
-  background: 'white',
-  borderRadius: '8px',
+const spinnerStyle: React.CSSProperties = {
+  width: '28px',
+  height: '28px',
+  border: '3px solid #e0e0e0',
+  borderTop: '3px solid #333',
+  borderRadius: '50%',
+  animation: 'spin 0.8s linear infinite',
+};
+
+const containerStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: '100vw',
+  height: '100vh',
+  background: '#f8f9fa',
+  fontFamily: 'system-ui, -apple-system, sans-serif',
+  padding: '16px',
+};
+
+const cardStyle: React.CSSProperties = {
+  background: '#ffffff',
+  border: '1px solid #eaeaea',
+  borderRadius: '12px',
   padding: '32px',
   width: '100%',
-  maxWidth: '360px',
-  boxShadow: '0 2px 16px rgba(0,0,0,0.15)',
+  maxWidth: '380px',
+  boxShadow: '0 4px 24px rgba(0, 0, 0, 0.04)',
+};
+
+const headerStyle: React.CSSProperties = {
+  marginBottom: '24px',
+  textAlign: 'center',
 };
 
 const titleStyle: React.CSSProperties = {
-  margin: '0 0 24px',
-  fontSize: '24px',
+  margin: '0 0 6px',
+  fontSize: '22px',
   fontWeight: '600',
-  color: '#333',
-  textAlign: 'center',
+  color: '#1a1a1a',
+  letterSpacing: '-0.3px',
+};
+
+const subtitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: '14px',
+  color: '#666',
 };
 
 const tabsStyle: React.CSSProperties = {
   display: 'flex',
-  gap: '8px',
-  marginBottom: '16px',
+  borderBottom: '1px solid #eaeaea',
+  marginBottom: '24px',
 };
 
-const tabButtonStyle: React.CSSProperties = {
+const tabStyle: React.CSSProperties = {
   flex: 1,
-  padding: '8px 12px',
+  padding: '10px 0',
+  background: 'none',
   border: 'none',
-  borderRadius: '4px',
   fontSize: '14px',
-  fontWeight: '500',
   cursor: 'pointer',
-  transition: 'all 200ms ease',
+  transition: 'all 0.15s ease',
+  textAlign: 'center',
 };
 
 const formStyle: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
-  gap: '12px',
+  gap: '18px',
+};
+
+const fieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '6px',
+};
+
+const labelStyle: React.CSSProperties = {
+  fontSize: '13px',
+  fontWeight: '500',
+  color: '#444',
 };
 
 const inputStyle: React.CSSProperties = {
   padding: '10px 12px',
-  border: '1px solid #ddd',
-  borderRadius: '4px',
+  border: '1px solid #d1d5db',
+  borderRadius: '6px',
   fontSize: '14px',
   fontFamily: 'inherit',
-};
-
-const buttonStyle: React.CSSProperties = {
-  padding: '10px 16px',
-  background: '#0066cc',
-  color: 'white',
-  border: 'none',
-  borderRadius: '4px',
-  fontSize: '14px',
-  fontWeight: '500',
-  cursor: 'pointer',
-  transition: 'all 200ms ease',
-};
-
-const secondaryButtonStyle: React.CSSProperties = {
-  padding: '10px 16px',
-  background: '#f0f0f0',
-  color: '#333',
-  border: 'none',
-  borderRadius: '4px',
-  fontSize: '14px',
-  fontWeight: '500',
-  cursor: 'pointer',
-  transition: 'all 200ms ease',
-};
-
-const dividerStyle: React.CSSProperties = {
-  textAlign: 'center',
-  margin: '16px 0',
-  color: '#999',
-  fontSize: '12px',
+  outline: 'none',
+  transition: 'border-color 0.15s ease',
 };
 
 const messageStyle: React.CSSProperties = {
-  padding: '8px 12px',
-  background: '#ffe0e0',
-  color: '#cc0000',
-  borderRadius: '4px',
-  fontSize: '12px',
+  padding: '10px 12px',
+  borderRadius: '6px',
+  fontSize: '13px',
   lineHeight: '1.4',
 };
 
-const smallTextStyle: React.CSSProperties = {
-  margin: '12px 0 0',
-  fontSize: '12px',
-  color: '#666',
-  lineHeight: '1.4',
-  textAlign: 'center',
+const submitBtnStyle: React.CSSProperties = {
+  padding: '11px 16px',
+  background: '#111111',
+  color: '#ffffff',
+  border: 'none',
+  borderRadius: '6px',
+  fontSize: '14px',
+  fontWeight: '500',
+  cursor: 'pointer',
+  transition: 'background 0.15s ease',
+  marginTop: '4px',
 };

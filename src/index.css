@@ -298,6 +298,10 @@ input, select, textarea { font-family: inherit; }
 .task.drop-bottom { box-shadow: 0 2px 0 0 var(--accent); }
 .task[draggable="true"] { cursor: grab; }
 .task[draggable="true"]:active { cursor: grabbing; }
+.task.touch-dragging {
+  opacity: 0.5;
+  background: var(--line) !important;
+}
 
 /* Inline trash icon: by default the same colour as the weekday labels
    (muted), near-transparent; turns to ink (black) on row hover. */
@@ -1139,7 +1143,22 @@ input, select, textarea { font-family: inherit; }
 .pop-color { min-width: 240px; }
 .color-row {
   display: flex; align-items: center; gap: 14px;
-  padding: 4px 0;
+  padding: 4px 6px;
+  border-radius: 6px;
+  transition: background 0.15s, opacity 0.15s;
+  cursor: grab;
+}
+.color-row:active {
+  cursor: grabbing;
+}
+.color-row.dragging {
+  opacity: 0.35;
+}
+.color-row.drop-above {
+  box-shadow: 0 -2px 0 0 var(--accent);
+}
+.color-row.drop-below {
+  box-shadow: 0 2px 0 0 var(--accent);
 }
 .color-row .color-label.unnamed {
   color: var(--muted);
@@ -2073,22 +2092,20 @@ input, select, textarea { font-family: inherit; }
   .modal-actions .btn { flex: 1; min-width: 0; padding: 14px 18px; }
   .modal-actions > div { display: flex; gap: 10px; width: 100%; }
 
-  /* Popovers: anchoring them to their own tool button pushes the leftmost
-     ones (category, reminder) off the left edge. On a phone they become a
-     centred bottom sheet instead, which is always fully on-screen. */
+  /* Popovers: display right under their tool button, not as a bottom bar over task fields */
   .popover,
   .pop-recurrence,
   .pop-color {
-    position: fixed;
-    top: auto;
-    right: auto;
-    left: 50%;
-    transform: translateX(-50%);
-    bottom: calc(80px + env(safe-area-inset-bottom, 0px));
-    width: min(360px, calc(100vw - 24px));
-    min-width: 0;
-    max-height: 50vh;
-    overflow: auto;
+    position: absolute;
+    top: calc(100% + 6px);
+    bottom: auto;
+    left: auto;
+    right: 0;
+    transform: none;
+    width: min(320px, 90vw);
+    min-width: 220px;
+    max-height: 380px;
+    overflow-y: auto;
     z-index: 100;
   }
   .pop-item { font-size: 16px; padding: 12px 10px; }
@@ -2133,12 +2150,26 @@ input, select, textarea { font-family: inherit; }
   .content { padding: 6px 20px 6px; }
   
   /* Week view - stacked layout for mobile */
-  .week-grid { gap: 16px; }
+  .week-grid { 
+    display: flex;
+    flex-direction: column;
+    gap: 16px; 
+  }
   .week-row { 
+    display: flex;
     flex-direction: column; 
     min-height: auto;
     gap: 8px;
   }
+  .week-row.bottom-row {
+    display: flex;
+    flex-direction: column;
+  }
+  /* On mobile: Sat & Sun first, then Backlog, then Soon */
+  .week-row.bottom-row > .cell:nth-child(1) { order: 3; } /* Бэклог */
+  .week-row.bottom-row > .cell:nth-child(2) { order: 4; } /* Скоро */
+  .week-row.bottom-row > .cell:nth-child(3) { order: 1; } /* Сб */
+  .week-row.bottom-row > .cell:nth-child(4) { order: 2; } /* Вс */
   .week-row > .cell { 
     min-height: var(--cell-min-height);
     flex: 1 0 auto;
@@ -2248,6 +2279,11 @@ input, select, textarea { font-family: inherit; }
     max-height: 30vh;
     z-index: 90;
     overflow: auto;
+  }
+  /* The main container/paper must remain static when journal opens, not pushed */
+  .app, .paper {
+    height: 100vh;
+    max-height: 100vh;
   }
   /* Collapsed sheet holds only the old corner button — hide it entirely on
      phones so it doesn't float as an empty bar over the bottom nav. */

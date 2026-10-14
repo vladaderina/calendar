@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { addDays, addMonths, addWeeks, addYears, format } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import type { View, Task } from './types';
@@ -10,12 +10,13 @@ import { YearView } from './components/YearView';
 import { DashboardView } from './components/DashboardView';
 import { PlannedListView } from './components/PlannedListView';
 import { AnalyticsView } from './components/AnalyticsView';
-import { store, useLastView, useJournal, pullRemoteTasks } from './store';
+import { store, useLastView, pullRemoteTasks } from './store';
 import { initSupabase } from './store';
 import { TaskModal } from './components/TaskModal';
 import { SearchModal } from './components/SearchModal';
 import { ChevronIcon } from './icons/ChevronIcon';
 import { AuthGate } from './components/AuthGate';
+import { signOut } from './lib/auth';
 
 // Inline SVG icons for the top nav.
 const DashboardIcon = () => (
@@ -55,19 +56,19 @@ const WeekViewIcon = () => (
     <path d="M4 9h14M9 4v5M14 4v5" />
   </svg>
 );
-const JournalIcon = () => (
-  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d="M4 9h16a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z" />
-    <line x1="12" y1="5" x2="12" y2="9" />
-    <line x1="5" y1="12" x2="19" y2="12" />
-  </svg>
-);
-
 const RefreshIcon = () => (
   <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
     <path d="M23 4v6h-6" />
     <path d="M1 20v-6h6" />
     <path d="M3.51 9a9 9 0 0 1 14.85-3.36M20.49 15a9 9 0 0 1-14.85 3.36" />
+  </svg>
+);
+
+const LogoutIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+    <polyline points="16 17 21 12 16 7" />
+    <line x1="21" y1="12" x2="9" y2="12" />
   </svg>
 );
 
@@ -80,13 +81,7 @@ function AppContent() {
   const [anchor, setAnchor] = useState(new Date());
   const [modal, setModal] = useState<{ initial?: Partial<Task>; editingId?: string; selectedDate?: string } | null>(null);
   const [showSearchModal, setShowSearchModal] = useState(false);
-  const [journalActive, setJournalActive] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const journalData = useJournal();
-  const [journalText, setJournalText] = useState('');
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const journalSectionRef = useRef<HTMLDivElement>(null);
-  const mobileNavRef = useRef<HTMLElement>(null);
 
   // Initialize Supabase when component mounts
   useEffect(() => {
@@ -146,68 +141,6 @@ function AppContent() {
   const openEdit = (t: Task, editingDate?: string) => {
     setModal({ initial: t, editingId: t.id, selectedDate: editingDate });
     setShowSearchModal(false);
-  };
-
-  // Load empty journal text when journal is opened (user types fresh content)
-  useEffect(() => {
-    if (journalActive) {
-      setJournalText('');
-      textareaRef.current?.focus();
-    }
-  }, [journalActive]);
-
-  // Save journal on blur or when deactivated
-  useEffect(() => {
-    if (!journalActive && journalText) {
-      store.saveJournalEntry(fmt.iso(anchor), journalText);
-    }
-  }, [journalActive, journalText, anchor]);
-
-  // Handle click outside to close journal (the mobile nav's notes button
-  // toggles it, so taps there must NOT count as "outside")
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      const target = e.target as Node;
-      const insideJournal = journalSectionRef.current?.contains(target) ?? false;
-      const insideMobileNav = mobileNavRef.current?.contains(target) ?? false;
-      if (!insideJournal && !insideMobileNav) {
-        setJournalActive(false);
-      }
-    };
-    if (journalActive) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [journalActive]);
-
-  const handleJournalChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setJournalText(e.target.value);
-  };
-
-  const handleJournalKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      // Auto-save on Enter (without shift), clear input but keep editor open
-      e.preventDefault();
-      if (journalText.trim()) {
-        const dateKey = fmt.iso(anchor);
-        const existing = journalData[dateKey] || '';
-        // Append to existing journal entry for the day
-        const newText = existing ? existing + '\n\n' + journalText.trim() : journalText.trim();
-        store.saveJournalEntry(dateKey, newText);
-        setJournalText('');
-        // Keep the editor open for more notes
-      }
-    } else if (e.key === 'Escape') {
-      setJournalActive(false);
-    }
-  };
-
-  const toggleJournal = () => {
-    if (journalActive) {
-      setJournalActive(false);
-    } else {
-      setJournalActive(true);
-    }
   };
 
   return (
@@ -300,6 +233,7 @@ function AppContent() {
                 <button className="nav-btn-arrow" onClick={() => shift(1)} aria-label="Вперёд"><ChevronIcon dir="right" /></button>
               </>
             )}
+            <button className="nav-btn-arrow" onClick={() => void signOut()} title="Выйти" aria-label="Выйти"><LogoutIcon /></button>
           </div>
         </div>
 
@@ -308,40 +242,14 @@ function AppContent() {
           {view === 'day' && <DayView anchor={anchor} onEdit={openEdit} />}
           {view === 'week' && <WeekView anchor={anchor} onEdit={openEdit} onPickDate={(d) => { setAnchor(d); setViewPersisted('day'); }} /> }
           {view === 'month' && <MonthView key={fmt.iso(anchor)} anchor={anchor} onEdit={openEdit} onPickDate={(d) => { setAnchor(d); setViewPersisted('day'); }} />}
-          {view === 'year' && <YearView key={fmt.iso(anchor)} anchor={anchor} onPickDate={(d) => { setAnchor(d); setViewPersisted('month'); }} onZoomIn={() => setViewPersisted('month')} />}
+          {view === 'year' && <YearView key={fmt.iso(anchor)} anchor={anchor} onPickDate={(d) => { setAnchor(d); setViewPersisted('week'); }} onZoomIn={() => setViewPersisted('month')} />}
           {view === 'planned' && <PlannedListView onEdit={openEdit} />}
           {view === 'analytics' && <AnalyticsView />}
         </div>
       </div>
 
-      {/* Inline journal editor at bottom-right */}
-      <div className={`inline-journal-section ${journalActive ? 'journal-open' : ''}`} ref={journalSectionRef}>
-        {journalActive && (
-          <textarea
-            ref={textareaRef}
-            className="inline-journal-textarea"
-            value={journalText}
-            onChange={handleJournalChange}
-            onKeyDown={handleJournalKeyDown}
-            placeholder="Запишите свои мысли..."
-            rows={2}
-            spellCheck={true}
-          />
-        )}
-        <button 
-          className={`view-icon-btn ${journalActive ? 'active' : ''}`} 
-          onClick={toggleJournal} 
-          title="Дневник" 
-          aria-label="Дневник"
-        >
-          <JournalIcon />
-        </button>
-      </div>
-
-      {/* Mobile-only bottom tab bar: week / dashboard / notes.
-          Hidden on desktop (.mobile-bottom-nav is display:none above 720px)
-          so the laptop keeps the full header switcher untouched. */}
-      <nav className="mobile-bottom-nav" ref={mobileNavRef} aria-label="Основная навигация">
+      {/* Mobile-only bottom tab bar: week / dashboard */}
+      <nav className="mobile-bottom-nav" aria-label="Основная навигация">
         <button
           className={`mobile-nav-btn ${view === 'dashboard' ? 'active' : ''}`}
           onClick={() => setViewPersisted('dashboard')}
@@ -357,14 +265,6 @@ function AppContent() {
           aria-label="Неделя"
         >
           <WeekViewIcon />
-        </button>
-        <button
-          className={`mobile-nav-btn ${journalActive ? 'active' : ''}`}
-          onClick={toggleJournal}
-          title="Заметки"
-          aria-label="Заметки"
-        >
-          <JournalIcon />
         </button>
       </nav>
 

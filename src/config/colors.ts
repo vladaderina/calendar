@@ -37,18 +37,43 @@ export function getColors(): TaskColor[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw);
-      // Merge: start from DEFAULT_COLORS, override labels from storage
-      // if the color values still match. This keeps new defaults appearing
-      // even if the user has an old stored palette.
-      const merged = DEFAULT_COLORS.map((def) => {
-        const stored = parsed.find((p: TaskColor) => p.value === def.value);
-        if (!stored) return def;
-        // Carry the stored label AND the disabled flag (unnamed: true), so a
-        // color the user removed stays unavailable after a reload.
-        return { ...def, label: stored.label, unnamed: stored.unnamed };
-      });
-      return merged;
+      const parsed: TaskColor[] = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        // Build map of parsed items by color value
+        const parsedMap = new Map<string, TaskColor>();
+        parsed.forEach((p) => {
+          if (p && p.value) parsedMap.set(p.value, p);
+        });
+
+        // Use stored order for colors present in stored array
+        const result: TaskColor[] = [];
+        const seen = new Set<string>();
+
+        parsed.forEach((p) => {
+          if (p && p.value && !seen.has(p.value)) {
+            seen.add(p.value);
+            const def = DEFAULT_COLORS.find((d) => d.value === p.value);
+            // If label is present, it's not unnamed unless explicitly true
+            const hasLabel = Boolean(p.label && p.label.trim());
+            const unnamed = hasLabel ? (p.unnamed === true ? true : false) : true;
+            result.push({
+              value: p.value,
+              label: p.label ?? def?.label ?? '',
+              unnamed,
+            });
+          }
+        });
+
+        // Append any DEFAULT_COLORS that were missing from stored
+        DEFAULT_COLORS.forEach((def) => {
+          if (!seen.has(def.value)) {
+            seen.add(def.value);
+            result.push({ ...def });
+          }
+        });
+
+        return result;
+      }
     }
   } catch {
     // malformed -> fall back
@@ -56,18 +81,47 @@ export function getColors(): TaskColor[] {
   return DEFAULT_COLORS;
 }
 
-export function saveColors(colors: TaskColor[]): void {
+export function saveColors(colors: TaskColor[], notifyStore = true): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(colors));
     window.dispatchEvent(new CustomEvent('colors-change'));
+    if (notifyStore) {
+      window.dispatchEvent(new CustomEvent('colors-sync-request'));
+    }
   } catch {
     // ignore quota errors
   }
 }
 
-// Renamed a color's label (label-only mutation; value is fixed).
+// Renamed a color's label (when label is non-empty, remove unnamed flag).
 export function renameColor(value: string, label: string): void {
-  saveColors(getColors().map((c) => (c.value === value ? { ...c, label } : c)));
+  const trimmed = label.trim();
+  saveColors(
+    getColors().map((c) => {
+      if (c.value !== value) return c;
+      if (trimmed) {
+        return { ...c, label: trimmed, unnamed: false };
+      }
+      return { ...c, label: '', unnamed: true };
+    })
+  );
+}
+
+// Reorder colors by an array of values
+export function reorderColors(orderedValues: string[]): void {
+  const current = getColors();
+  const map = new Map(current.map((c) => [c.value, c]));
+  const result: TaskColor[] = [];
+  orderedValues.forEach((val) => {
+    const c = map.get(val);
+    if (c) {
+      result.push(c);
+      map.delete(val);
+    }
+  });
+  // Append any leftover colors
+  map.forEach((c) => result.push(c));
+  saveColors(result);
 }
 
 // Removed: addColor — the palette is now fixed/curated.
