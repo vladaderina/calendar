@@ -1,4 +1,5 @@
-// The dashboard's category tree: category (level 1) → folder (2) → folder (3).
+// The dashboard's category tree: category (level 1) → folders (2, 3) and
+// NOTES — files that sit inside a category or a folder, like Obsidian.
 //
 // Every node owns its own BLOCKS. A new category or folder starts EMPTY — the
 // user adds "задачи", "заметки" or "мудборд" herself, which is what she asked
@@ -17,22 +18,28 @@ export type BlockKind = 'tasks' | 'notes' | 'moodboard';
 
 export const BLOCK_LABEL: Record<BlockKind, string> = {
   tasks: 'задачи',
-  notes: 'заметки',
+  notes: 'стикеры',
   moodboard: 'мудборд',
 };
 
 /** Short hint under each block button in the "+ блок" menu. */
 export const BLOCK_HINT: Record<BlockKind, string> = {
   tasks: 'список задач этой папки',
-  notes: 'стикеры, которые жалко потерять',
+  notes: 'быстрые записи-карточки',
   moodboard: 'картинки и фото',
 };
+
+export type NodeKind = 'folder' | 'note';
 
 export interface TreeNode {
   id: string;
   name: string;
+  /** A folder holds folders and notes; a note holds a document, never children. */
+  kind: NodeKind;
   blocks: BlockKind[];
   children: TreeNode[];
+  /** For `kind === 'note'`: id of the document in `lib/board`. */
+  noteId?: string;
 }
 
 export interface CategoryTree {
@@ -43,8 +50,15 @@ export interface CategoryTree {
 
 export type Tree = Record<string, CategoryTree>;
 
-/** Category = level 1, so two nested folders fit under it. */
+/** Category = level 1, so two nested folders (and notes) fit under it. */
 export const MAX_LEVEL = 3;
+
+/** May a FOLDER be created inside a node at `path`? (category → folder → folder) */
+export const canAddChild = (path: string[]): boolean => path.length + 1 <= MAX_LEVEL - 1;
+
+/** May a NOTE be created inside a node at `path`? Notes are leaves, so they also
+ *  fit into the last folders: category → folder → folder → notes. */
+export const canAddNote = (path: string[]): boolean => path.length + 1 <= MAX_LEVEL;
 
 const SEP = '\u001F';
 
@@ -68,8 +82,19 @@ export const emptyCategory = (): CategoryTree => ({ blocks: [], children: [] });
 export const newNode = (name: string, blocks: BlockKind[] = []): TreeNode => ({
   id: uuid(),
   name: name.trim(),
+  kind: 'folder',
   blocks: [...blocks],
   children: [],
+});
+
+/** A note is a leaf: title here, checklist inside the linked document. */
+export const newNoteNode = (title: string, noteId: string): TreeNode => ({
+  id: uuid(),
+  name: title.trim(),
+  kind: 'note',
+  blocks: [],
+  children: [],
+  noteId,
 });
 
 export function isBlockKind(value: unknown): value is BlockKind {
@@ -96,15 +121,19 @@ function normNodes(raw: unknown, legacyBlocks: BlockKind[]): TreeNode[] {
         : '');
     if (!name || out.some((node) => node.name === name)) continue;
     if (typeof item === 'string') {
-      out.push({ id: uuid(), name, blocks: [...legacyBlocks], children: [] });
+      out.push({ id: uuid(), name, kind: 'folder', blocks: [...legacyBlocks], children: [] });
       continue;
     }
     const src = item as Record<string, unknown>;
+    const kind: NodeKind = src.kind === 'note' ? 'note' : 'folder';
     out.push({
       id: typeof src.id === 'string' && src.id ? src.id : uuid(),
       name,
-      blocks: normBlocks(src.blocks, legacyBlocks),
-      children: normNodes(src.children, legacyBlocks),
+      kind,
+      // A note is a document, not a place for blocks or sub-nodes.
+      blocks: kind === 'note' ? [] : normBlocks(src.blocks, legacyBlocks),
+      children: kind === 'note' ? [] : normNodes(src.children, legacyBlocks),
+      noteId: kind === 'note' && typeof src.noteId === 'string' && src.noteId ? src.noteId : undefined,
     });
   }
   return out;

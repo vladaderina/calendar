@@ -16,6 +16,7 @@ import {
   mapNode,
   mergeTree,
   newNode,
+  newNoteNode,
   nodeAt,
   normalizeTree,
   pathExists,
@@ -2391,6 +2392,23 @@ export const store = {
       : category.children;
     if (siblings.some((node) => node.name === n)) return;
     const children = insertNode(category.children, parentPath, newNode(n));
+    topics = { ...topics, [sphere]: { ...category, children } };
+    emit();
+  },
+  /** Add a NOTE inside a folder (or the category). The title lives in the tree,
+   *  the checklist lives in the linked document (`lib/board`). */
+  addNote(sphere: string, parentPath: string[], title: string, noteId: string) {
+    const n = title.trim();
+    if (!n || !noteId || !spheres.includes(sphere)) return;
+    // Notes are leaves: they also fit INSIDE the last folder (category →
+    // folder → folder → notes), one level deeper than a folder could go.
+    if (parentPath.length > MAX_LEVEL - 1) return;
+    const category = topics[sphere] ?? emptyCategory();
+    const siblings = parentPath.length
+      ? (nodeAt(category.children, parentPath)?.children ?? [])
+      : category.children;
+    if (siblings.some((node) => node.name === n)) return;
+    const children = insertNode(category.children, parentPath, newNoteNode(n, noteId));
     topics = { ...topics, [sphere]: { ...category, children } };
     emit();
   },

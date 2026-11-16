@@ -1,12 +1,15 @@
 // Moodboard + dashboard notes.
 //
-// Two kinds of entries live here, both belonging to the DASHBOARD only:
+// Three kinds of entries live here, all belonging to the DASHBOARD only:
 //   • photo — a picture for the moodboard (stored as a data URL, already
 //     downscaled by `lib/image.ts`), with an optional caption;
-//   • note  — a short sticky note in the notes block.
+//   • note  — a short sticky card in the «стикеры» block;
+//   • doc   — a real note-document (title + checklist), shown as a file in the
+//     category tree. Checklist lines may be planned to a day: that creates an
+//     ordinary Task, so the existing day/week planner does the scheduling.
 //
-// They are deliberately NOT tasks: they are never counted in any task list,
-// they never appear on the wheel or in the planner.
+// They are deliberately NOT tasks themselves: none of them is counted in a task
+// list, appears on the wheel or in the planner.
 //
 // Storage: one map in localStorage (`calendar.board.v1`), mirrored per entry
 // into the `board_items` table. Every entry carries `t` (time of the last
@@ -53,12 +56,55 @@ export interface BoardNote {
   deleted?: boolean;
 }
 
-export type BoardItem = BoardPhoto | BoardNote;
+export interface DocBlock {
+  id: string;
+  kind: 'text' | 'check';
+  text: string;
+  /** Checklist state. A planned line is also done when its task is done. */
+  done?: boolean;
+  /** Task created by planning this line to a day (`startDate = endDate = date`). */
+  taskId?: string;
+  /** yyyy-MM-dd chosen for this line. */
+  date?: string;
+}
+
+/** A note-document: what the tree shows as a note file. */
+export interface BoardDoc {
+  id: string;
+  kind: 'doc';
+  title: string;
+  blocks: DocBlock[];
+  nodeKey: string;
+  born: number;
+  t: number;
+  deleted?: boolean;
+}
+
+export type BoardItem = BoardPhoto | BoardNote | BoardDoc;
 
 type Store = Record<string, BoardItem>;
 
 function isPhoto(item: BoardItem): item is BoardPhoto {
   return item.kind === 'photo';
+}
+
+function sanitizeBlocks(raw: unknown): DocBlock[] {
+  if (!Array.isArray(raw)) return [];
+  const out: DocBlock[] = [];
+  for (const item of raw.slice(0, 4000)) {
+    if (!item || typeof item !== 'object') continue;
+    const src = item as Record<string, unknown>;
+    const check = src.kind === 'check';
+    out.push({
+      id: typeof src.id === 'string' && src.id ? src.id : uuid(),
+      kind: check ? 'check' : 'text',
+      text: typeof src.text === 'string' ? src.text : '',
+      done: check && src.done === true ? true : undefined,
+      taskId: typeof src.taskId === 'string' && src.taskId ? src.taskId : undefined,
+      date: typeof src.date === 'string' ? src.date : undefined,
+    });
+  }
+  return out;
 }
 
 function sanitize(id: string, value: unknown): BoardItem | null {
@@ -75,6 +121,21 @@ function sanitize(id: string, value: unknown): BoardItem | null {
       kind: 'photo',
       data: deleted ? '' : data,
       caption: typeof src.caption === 'string' ? src.caption : '',
+      nodeKey: typeof src.nodeKey === 'string' ? src.nodeKey : '',
+      born: Number(src.born) || t,
+      t,
+      deleted,
+    };
+  }
+  if (src.kind === 'doc') {
+    const title = typeof src.title === 'string' ? src.title : '';
+    const blocks = sanitizeBlocks(src.blocks);
+    if (!title.trim() && !blocks.length && !deleted) return null;
+    return {
+      id,
+      kind: 'doc',
+      title,
+      blocks,
       nodeKey: typeof src.nodeKey === 'string' ? src.nodeKey : '',
       born: Number(src.born) || t,
       t,
@@ -118,11 +179,17 @@ function load(): Store {
 let items: Store = load();
 let photosSnapshot: BoardPhoto[] = [];
 let notesSnapshot: BoardNote[] = [];
+let docsSnapshot: BoardDoc[] = [];
 
 function rebuild(): void {
   const all = Object.values(items).filter((item) => !item.deleted);
   photosSnapshot = all.filter(isPhoto).sort((a, b) => a.born - b.born);
-  notesSnapshot = (all.filter((item) => !isPhoto(item)) as BoardNote[]).sort((a, b) => a.born - b.born);
+  notesSnapshot = all
+    .filter((item) => item.kind === 'note')
+    .sort((a, b) => a.born - b.born) as BoardNote[];
+  docsSnapshot = all
+    .filter((item) => item.kind === 'doc')
+    .sort((a, b) => a.born - b.born) as BoardDoc[];
 }
 rebuild();
 
@@ -163,6 +230,16 @@ export function useBoardNotes(): BoardNote[] {
 
 export function getBoardPhotos(): BoardPhoto[] {
   return photosSnapshot;
+}
+
+export function useBoardDocs(): BoardDoc[] {
+  return useSyncExternalStore(subscribe, () => docsSnapshot, () => docsSnapshot);
+}
+
+export function getBoardDoc(id: string | undefined): BoardDoc | null {
+  if (!id) return null;
+  const item = items[id];
+  return item && item.kind === 'doc' && !item.deleted ? item : null;
 }
 
 export type AddResult = { ok: true } | { ok: false; message: string };
@@ -218,12 +295,83 @@ export function updateBoardNote(id: string, patch: { text?: string; color?: stri
   persist();
 }
 
+/** Create an empty note-document — the file the tree shows as a note. */
+export function addBoardDoc(title: string, nodeKey = ''): BoardDoc {
+  const id = uuid();
+  const now = Date.now();
+  const doc: BoardDoc = {
+    id,
+    kind: 'doc',
+    title: title.trim() || 'без названия',
+    blocks: [],
+    nodeKey,
+    born: now,
+    t: now,
+  };
+  items[id] = doc;
+  persist();
+  return doc;
+}
+
+let docTimer: number | undefined;
+
+/** Typing in a note must not rewrite the whole map (photos included) on every
+ *  keystroke: update memory and re-render now, write localStorage a moment later. */
+function persistSoon(): void {
+  rebuild();
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(EVENT));
+  window.clearTimeout(docTimer);
+  docTimer = window.setTimeout(() => {
+    docTimer = undefined;
+    persist();
+  }, 600);
+}
+
+export function saveBoardDoc(id: string, patch: { title?: string; blocks?: DocBlock[] }): void {
+  const cur = items[id];
+  if (!cur || cur.kind !== 'doc' || cur.deleted) return;
+  items[id] = {
+    ...cur,
+    title: patch.title !== undefined ? patch.title : cur.title,
+    blocks: patch.blocks ?? cur.blocks,
+    t: Date.now(),
+  };
+  persistSoon();
+}
+
+/** Write a pending debounced note change right now (blur / page hide). */
+export function flushBoard(): void {
+  if (docTimer === undefined) return;
+  window.clearTimeout(docTimer);
+  docTimer = undefined;
+  persist();
+}
+
+/** Tombstone the note-documents that lived inside a deleted folder: their tree
+ *  nodes are gone, tasks they planned to a day stay (they are real tasks). */
+export function removeDocsUnder(nodeKey: string): void {
+  if (!nodeKey) return;
+  // A category key already ends with the separator, a folder key does not.
+  const prefix = nodeKey.endsWith('\u001F') ? nodeKey : `${nodeKey}\u001F`;
+  let changed = false;
+  for (const item of Object.values(items)) {
+    if (item.deleted || item.kind !== 'doc') continue;
+    if (item.nodeKey === nodeKey || item.nodeKey.startsWith(prefix)) {
+      items[item.id] = { ...item, blocks: [], deleted: true, t: Date.now() };
+      changed = true;
+    }
+  }
+  if (changed) persist();
+}
+
 /** Tombstone, never a plain delete: the other device may still hold the entry. */
 export function removeBoardItem(id: string): void {
   const cur = items[id];
   if (!cur) return;
   if (cur.kind === 'photo') {
     items[id] = { ...cur, data: '', deleted: true, t: Date.now() };
+  } else if (cur.kind === 'doc') {
+    items[id] = { ...cur, blocks: [], deleted: true, t: Date.now() };
   } else {
     items[id] = { ...cur, text: '', deleted: true, t: Date.now() };
   }
@@ -277,7 +425,9 @@ interface Row {
 function toRow(item: BoardItem, userId: string): Row & { user_id: string } {
   const payload: Record<string, unknown> = item.kind === 'photo'
     ? { data: item.data, caption: item.caption, born: item.born, nodeKey: item.nodeKey }
-    : { text: item.text, color: item.color, born: item.born, nodeKey: item.nodeKey };
+    : item.kind === 'doc'
+      ? { title: item.title, blocks: item.blocks, born: item.born, nodeKey: item.nodeKey }
+      : { text: item.text, color: item.color, born: item.born, nodeKey: item.nodeKey };
   return { id: item.id, user_id: userId, kind: item.kind, payload, t: item.t, deleted: item.deleted === true };
 }
 
@@ -294,6 +444,16 @@ function fromRow(row: Record<string, unknown>): BoardItem | null {
       kind: 'photo',
       data: typeof payload.data === 'string' ? payload.data : '',
       caption: typeof payload.caption === 'string' ? payload.caption : '',
+      nodeKey: typeof payload.nodeKey === 'string' ? payload.nodeKey : '',
+      born: Number(payload.born) || undefined,
+    });
+  }
+  if (row.kind === 'doc') {
+    return sanitize(base.id, {
+      ...base,
+      kind: 'doc',
+      title: typeof payload.title === 'string' ? payload.title : '',
+      blocks: payload.blocks,
       nodeKey: typeof payload.nodeKey === 'string' ? payload.nodeKey : '',
       born: Number(payload.born) || undefined,
     });
@@ -398,7 +558,9 @@ export function startBoardSync(): () => void {
   const onVisible = () => {
     if (document.visibilityState === 'visible') void syncBoard();
   };
+  const onHide = () => flushBoard();
   window.addEventListener(NUDGE, kick);
+  window.addEventListener('pagehide', onHide);
   window.addEventListener('online', onVisible);
   document.addEventListener('visibilitychange', onVisible);
   const interval = window.setInterval(onVisible, 60_000);
@@ -406,6 +568,7 @@ export function startBoardSync(): () => void {
   return () => {
     window.clearTimeout(timer);
     window.removeEventListener(NUDGE, kick);
+    window.removeEventListener('pagehide', onHide);
     window.removeEventListener('online', onVisible);
     document.removeEventListener('visibilitychange', onVisible);
     window.clearInterval(interval);

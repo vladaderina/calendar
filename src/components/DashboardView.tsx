@@ -7,7 +7,8 @@ import { sortByPriority } from '../utils/date';
 import {
   BLOCK_HINT,
   BLOCK_LABEL,
-  MAX_LEVEL,
+  canAddChild,
+  canAddNote,
   inSubtree,
   keyPath,
   nodeAt,
@@ -17,18 +18,23 @@ import {
 } from '../lib/tree';
 import {
   NOTE_COLORS,
+  addBoardDoc,
   addBoardNote,
   addBoardPhoto,
   claimOrphans,
   removeBoardItem,
+  removeDocsUnder,
   rekeyNode,
+  saveBoardDoc,
   startBoardSync,
   syncBoard,
   updateBoardNote,
   updateBoardPhoto,
+  useBoardDocs,
   useBoardNotes,
   useBoardPhotos,
 } from '../lib/board';
+import { NoteEditor } from './NoteEditor';
 import { fileToDataUrl } from '../lib/image';
 
 interface Props {
@@ -182,12 +188,13 @@ export function DashboardView({ onEdit }: Props) {
   const tree = useTopics();
   const photos = useBoardPhotos();
   const notes = useBoardNotes();
+  const docs = useBoardDocs();
 
   const [sel, setSel] = useState<Selection>(() => ({ sphere: spheres[0] ?? '', path: [] }));
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
     spheres[0] ? { [nodeKeyOf(spheres[0], [])]: true } : {},
   );
-  const [adding, setAdding] = useState<{ sphere: string; path: string[] } | null>(null);
+  const [adding, setAdding] = useState<{ sphere: string; path: string[]; kind: 'folder' | 'note' } | null>(null);
   const [draftName, setDraftName] = useState('');
   const [creatingCategory, setCreatingCategory] = useState(false);
   const [newCategory, setNewCategory] = useState('');
@@ -252,9 +259,13 @@ export function DashboardView({ onEdit }: Props) {
 
   const category = tree[sel.sphere];
   const current: TreeNode | null = sel.path.length ? nodeAt(category?.children ?? [], sel.path) : null;
-  const blocks: BlockKind[] = sel.path.length
-    ? (current?.blocks ?? [])
-    : (category?.blocks ?? ['tasks']);
+  const isNote = current?.kind === 'note';
+  const noteDoc = isNote ? docs.find((item) => item.id === current?.noteId) ?? null : null;
+  const blocks: BlockKind[] = isNote
+    ? []
+    : sel.path.length
+      ? (current?.blocks ?? [])
+      : (category?.blocks ?? ['tasks']);
   const nodeKey = nodeKeyOf(sel.sphere, sel.path);
   const topicKey = sel.path.length ? pathKey(sel.path) : undefined;
 
@@ -269,7 +280,8 @@ export function DashboardView({ onEdit }: Props) {
     [tasks, sel.sphere, sel.path],
   );
 
-  const canNest = (path: string[]) => path.length + 1 <= MAX_LEVEL - 1;
+  const canNest = (path: string[]) => canAddChild(path);
+  const canNote = (path: string[]) => canAddNote(path);
 
   const select = (sphere: string, path: string[]) => {
     setSel({ sphere, path });
@@ -287,8 +299,9 @@ export function DashboardView({ onEdit }: Props) {
 
   const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
 
-  const startAdd = (sphere: string, parentPath: string[]) => {
-    setAdding({ sphere, path: parentPath });
+  const startAdd = (sphere: string, parentPath: string[], kind: 'folder' | 'note' = 'folder') => {
+    if (kind === 'note' ? !canNote(parentPath) : !canAddChild(parentPath)) return;
+    setAdding({ sphere, path: parentPath, kind });
     setDraftName('');
     setExpanded((prev) => {
       const next = { ...prev };
@@ -299,13 +312,21 @@ export function DashboardView({ onEdit }: Props) {
 
   const commitAdd = () => {
     if (!adding) return;
-    const name = draftName.trim();
+    const kind = adding.kind;
+    const name = kind === 'note' ? (draftName.trim() || 'без названия') : draftName.trim();
     if (name) {
       const siblings = adding.path.length
         ? (nodeAt(tree[adding.sphere]?.children ?? [], adding.path)?.children ?? [])
         : (tree[adding.sphere]?.children ?? []);
       if (!siblings.some((node) => node.name === name)) {
-        store.addTopic(adding.sphere, name, adding.path);
+        if (kind === 'note') {
+          // The checklist lives in a document; the tree only keeps the title.
+          const nodeKey = nodeKeyOf(adding.sphere, [...adding.path, name]);
+          const item = addBoardDoc(name, nodeKey);
+          store.addNote(adding.sphere, adding.path, name, item.id);
+        } else {
+          store.addTopic(adding.sphere, name, adding.path);
+        }
         select(adding.sphere, [...adding.path, name]);
       }
     }
@@ -344,22 +365,41 @@ export function DashboardView({ onEdit }: Props) {
       return;
     }
     if (name === sel.path[sel.path.length - 1]) return;
+    const node = nodeAt(tree[sel.sphere]?.children ?? [], sel.path);
+    const nextPath = [...sel.path.slice(0, -1), name];
+    const oldKey = nodeKeyOf(sel.sphere, sel.path);
     store.renameTopic(sel.sphere, sel.path, name);
-    setSel((prev) => ({ ...prev, path: [...prev.path.slice(0, -1), name] }));
+    if (node?.kind === 'note') {
+      if (node.noteId) saveBoardDoc(node.noteId, { title: name });
+    }
+    // Stickers, pictures and documents are keyed by the PATH OF NAMES: without
+    // this the renamed folder (or note) would lose all of them.
+    rekeyNode(oldKey, nodeKeyOf(sel.sphere, nextPath));
+    setSel((prev) => ({ ...prev, path: nextPath }));
   };
 
   const deleteSelected = () => {
     setConfirmDelete(false);
     if (!sel.sphere) return;
     if (!sel.path.length) {
+      // The notes inside the category go with it; their planned tasks stay.
+      removeDocsUnder(nodeKeyOf(sel.sphere, []));
       store.removeSphere(sel.sphere);
       setSel({ sphere: '', path: [] });
       return;
     }
+    const node = nodeAt(tree[sel.sphere]?.children ?? [], sel.path);
+    const key = nodeKeyOf(sel.sphere, sel.path);
     store.removeTopic(sel.sphere, sel.path);
-    // Notes and pictures of the deleted folder move one level up instead of
-    // becoming unreachable.
-    rekeyNode(nodeKeyOf(sel.sphere, sel.path), nodeKeyOf(sel.sphere, sel.path.slice(0, -1)));
+    if (node?.kind === 'note') {
+      if (node.noteId) removeBoardItem(node.noteId);
+    } else {
+      // Note-documents inside the deleted folder go with it (the tasks they
+      // planned to a day stay — those are real tasks now); stickers and
+      // pictures move one level up instead of becoming unreachable.
+      removeDocsUnder(key);
+      rekeyNode(key, nodeKeyOf(sel.sphere, sel.path.slice(0, -1)));
+    }
     setSel({ sphere: sel.sphere, path: sel.path.slice(0, -1) });
   };
 
@@ -471,10 +511,11 @@ export function DashboardView({ onEdit }: Props) {
       {nodes.map((node) => {
         const path = [...parentPath, node.name];
         const key = nodeKeyOf(sphere, path);
-        const open = !!expanded[key];
+        const note = node.kind === 'note';
+        const open = !note && !!expanded[key];
         const active = sel.sphere === sphere && pathKey(sel.path) === pathKey(path);
         const count = counts.byNode[key] ?? 0;
-        const can = canNest(path);
+        const can = !note && canNest(path);
         return (
           <div className="dash-node" key={node.id}>
             <div
@@ -488,17 +529,26 @@ export function DashboardView({ onEdit }: Props) {
               onClick={() => select(sphere, path)}
               {...rowDragProps({ kind: 'folder', id: node.id, name: node.name, sphere, parentPath })}
             >
-              <button
-                type="button"
-                className={`dash-chev ${open ? 'open' : ''}`}
-                onClick={(event) => { event.stopPropagation(); toggle(key); }}
-                aria-label={open ? 'Свернуть' : 'Показать вложенные папки'}
-                title={open ? 'Свернуть' : 'Вложенные папки'}
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-                  <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
+              {note ? (
+                <span className="dash-note-glyph" aria-hidden>
+                  <svg width="11" height="12" viewBox="0 0 12 13">
+                    <path d="M2.5 1.5h4l3 3v7h-7z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                    <path d="M6.5 1.5v3h3" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+                  </svg>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className={`dash-chev ${open ? 'open' : ''}`}
+                  onClick={(event) => { event.stopPropagation(); toggle(key); }}
+                  aria-label={open ? 'Свернуть' : 'Показать вложенные папки'}
+                  title={open ? 'Свернуть' : 'Вложенные папки'}
+                >
+                  <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+                    <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              )}
               <span className="dash-node-name">{node.name}</span>
               {count > 0 && <span className="dash-node-count">{count}</span>}
               {can && (
@@ -511,8 +561,8 @@ export function DashboardView({ onEdit }: Props) {
                 >+</button>
               )}
             </div>
-            {open && node.children.length > 0 && renderFolders(sphere, node.children, path, depth + 1)}
-            {open && adding && adding.sphere === sphere && pathKey(adding.path) === pathKey(path) && (
+            {open && !note && node.children.length > 0 && renderFolders(sphere, node.children, path, depth + 1)}
+            {open && !note && adding && adding.sphere === sphere && pathKey(adding.path) === pathKey(path) && (
               <input
                 autoFocus
                 className="dash-sub-input"
@@ -626,8 +676,8 @@ export function DashboardView({ onEdit }: Props) {
         </div>
 
         <div className="dash-rail-hint">
-          внутри категории до {MAX_LEVEL} уровней: категория → папка → папка.
-          задачу можно перетащить на любой уровень.
+          категория → папка → папка. заметку можно положить в любую папку,
+          а её пункты — поставить в план на конкретный день.
         </div>
       </aside>
 
@@ -682,10 +732,10 @@ export function DashboardView({ onEdit }: Props) {
                   )}
                 </div>
 
-                <span className="dash-page-count">{list.length}</span>
+                {!isNote && <span className="dash-page-count">{list.length}</span>}
 
                 <div className="dash-page-actions">
-                  {missing.length > 0 && (
+                  {!isNote && missing.length > 0 && (
                     <div className="dash-add-wrap">
                       <button
                         type="button"
@@ -722,18 +772,34 @@ export function DashboardView({ onEdit }: Props) {
                                 <span className="dash-palette-hint">вложенная папка внутри этой</span>
                               </button>
                             )}
+                            {canNote(sel.path) && (
+                              <button
+                                type="button"
+                                className="dash-palette-item"
+                                role="menuitem"
+                                onClick={() => { setPaletteOpen(false); startAdd(sel.sphere, sel.path, 'note'); }}
+                              >
+                                <span className="dash-palette-name">заметка</span>
+                                <span className="dash-palette-hint">файл с чеклистом внутри этой</span>
+                              </button>
+                            )}
                           </div>
                         </>
                       )}
                     </div>
                   )}
-                  {canNest(sel.path) && (
+                  {!isNote && canNest(sel.path) && (
                     <button type="button" className="dash-muted" onClick={() => startAdd(sel.sphere, sel.path)}>+ папка</button>
+                  )}
+                  {!isNote && canNote(sel.path) && (
+                    <button type="button" className="dash-muted" onClick={() => startAdd(sel.sphere, sel.path, 'note')}>+ заметка</button>
                   )}
                   {confirmDelete ? (
                     <>
                       <button type="button" className="dash-danger" onClick={deleteSelected}>
-                        {sel.path.length ? 'удалить папку' : 'удалить категорию'}
+                        {sel.path.length
+                          ? (isNote ? 'удалить заметку' : 'удалить папку')
+                          : 'удалить категорию'}
                       </button>
                       <button type="button" className="dash-muted" onClick={() => setConfirmDelete(false)}>отмена</button>
                     </>
@@ -748,6 +814,21 @@ export function DashboardView({ onEdit }: Props) {
           </header>
 
           {sel.sphere ? (
+            isNote ? (
+              noteDoc ? (
+                <NoteEditor
+                  key={noteDoc.id}
+                  doc={noteDoc}
+                  sphere={sel.sphere}
+                  topic={sel.path.length > 1 ? pathKey(sel.path.slice(0, -1)) : undefined}
+                  onTitleChange={commitRename}
+                />
+              ) : (
+                <div className="dash-hint-line">
+                  эта заметка не найдена — возможно, её удалили на другом устройстве
+                </div>
+              )
+            ) : (
             <div className="dash-blocks">
               {blocks.map((kind) => {
                 if (kind === 'tasks') {
@@ -785,11 +866,11 @@ export function DashboardView({ onEdit }: Props) {
                 if (kind === 'notes') {
                   return (
                     <section className="dash-block dash-block-notes" key="notes">
-                      <BlockHead title="заметки" count={nodeNotes.length} onRemove={() => removeBlock('notes')} />
+                      <BlockHead title="стикеры" count={nodeNotes.length} onRemove={() => removeBlock('notes')} />
                       <div className="dash-note-new">
                         <textarea
                           value={noteDraft}
-                          placeholder="новая заметка — Enter, чтобы добавить"
+                          placeholder="новая карточка — Enter, чтобы добавить"
                           rows={2}
                           onChange={(event) => setNoteDraft(event.target.value)}
                           onKeyDown={(event) => {
@@ -891,10 +972,17 @@ export function DashboardView({ onEdit }: Props) {
                         <span className="dash-empty-hint">вложенная папка внутри этой</span>
                       </button>
                     )}
+                    {canNote(sel.path) && (
+                      <button type="button" className="dash-empty-btn" onClick={() => startAdd(sel.sphere, sel.path, 'note')}>
+                        <span className="dash-empty-name">заметка</span>
+                        <span className="dash-empty-hint">файл с чеклистом внутри этой</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
             </div>
+            )
           ) : (
             <div className="dash-hint-line">создай категорию слева — внутри неё собираются блоки</div>
           )}
