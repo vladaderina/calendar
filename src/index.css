@@ -3261,6 +3261,12 @@ input, select, textarea { font-family: inherit; }
 .dash-node-row.active .dash-node-plus { color: rgba(255, 255, 255, 0.8); }
 .dash-node-row.active .dash-node-plus:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
 .dash-node-row.dash-folder-row { padding-right: 6px; }
+/* Subfolders read as plain text: bold is reserved for the top-level category. */
+.dash-node-row.dash-folder-row .dash-node-name {
+  font-weight: 400;
+  font-size: 13px;
+  letter-spacing: 0;
+}
 .dash-panel {
   min-width: 0;
   display: flex;
