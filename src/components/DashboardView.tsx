@@ -1,14 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { DragEvent, ReactNode } from 'react';
 import type { Task } from '../types';
-import { DEFAULT_TOPIC } from '../types';
 import { TaskItem } from './TaskItem';
 import { store, useSpheres, useTasks, useTopics } from '../store';
 import { sortByPriority } from '../utils/date';
 import {
+  BLOCK_HINT,
+  BLOCK_LABEL,
+  MAX_LEVEL,
+  inSubtree,
+  keyPath,
+  nodeAt,
+  pathKey,
+  type BlockKind,
+  type TreeNode,
+} from '../lib/tree';
+import {
   NOTE_COLORS,
   addBoardNote,
   addBoardPhoto,
+  claimOrphans,
   removeBoardItem,
+  rekeyNode,
   startBoardSync,
   syncBoard,
   updateBoardNote,
@@ -22,12 +35,27 @@ interface Props {
   onEdit: (task: Task) => void;
 }
 
-function makeReorderInTopic(tasks: Task[], sphere: string, topic: string, list: Task[]) {
+type Selection = { sphere: string; path: string[] };
+
+const SEP = '\u001F';
+
+/** Identity of a dashboard node: its category plus the folder path. */
+const nodeKeyOf = (sphere: string, path: string[]): string => `${sphere}${SEP}${pathKey(path)}`;
+
+function reorderIds(ids: string[], draggedId: string, targetId: string): string[] {
+  const next = ids.filter((id) => id !== draggedId);
+  let at = next.indexOf(targetId);
+  if (at < 0) at = next.length;
+  else at += 1;
+  next.splice(at, 0, draggedId);
+  return next;
+}
+
+function makeReorderInNode(tasks: Task[], sphere: string, topic: string | undefined, list: Task[]) {
   return (draggedId: string, targetId: string, place: 'above' | 'below') => {
     const dragged = tasks.find((task) => task.id === draggedId);
-    const topicValue = topic === DEFAULT_TOPIC ? undefined : topic;
-    if (dragged && (dragged.unplanned || dragged.sphere !== sphere || dragged.topic !== topicValue)) {
-      store.update(draggedId, { sphere, topic: topicValue, unplanned: false });
+    if (dragged && (dragged.unplanned || dragged.sphere !== sphere || dragged.topic !== topic)) {
+      store.update(draggedId, { sphere, topic, unplanned: false });
     }
     const ids = list.map((task) => task.id).filter((id) => id !== draggedId);
     let index = ids.indexOf(targetId);
@@ -38,7 +66,7 @@ function makeReorderInTopic(tasks: Task[], sphere: string, topic: string, list: 
   };
 }
 
-function QuickAdd({ sphere, topic, onDone }: { sphere: string; topic: string; onDone: () => void }) {
+function QuickAdd({ sphere, topic, onDone }: { sphere: string; topic: string | undefined; onDone: () => void }) {
   const [value, setValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   const allTasks = useTasks();
@@ -52,7 +80,7 @@ function QuickAdd({ sphere, topic, onDone }: { sphere: string; topic: string; on
   const submit = () => {
     const title = value.trim();
     if (title) {
-      store.add({ title, sphere, topic: topic === DEFAULT_TOPIC ? undefined : topic, unplanned: true });
+      store.add({ title, sphere, topic, unplanned: true });
       setValue('');
       inputRef.current?.focus();
     } else {
@@ -125,33 +153,50 @@ function NoteCard({ id, text, color }: { id: string; text: string; color: string
   );
 }
 
-type Selection = { sphere: string; topic: string | null };
-type DragKind = 'sphere' | 'topic';
-type DragPayload = { kind: DragKind; value: string; sphere: string };
+function BlockHead({
+  title,
+  count,
+  actions,
+  onRemove,
+}: {
+  title: string;
+  count?: number;
+  actions?: ReactNode;
+  onRemove: () => void;
+}) {
+  return (
+    <header className="dash-block-head">
+      <span className="dash-block-title">{title}</span>
+      {typeof count === 'number' && count > 0 && <span className="dash-block-count">{count}</span>}
+      <div className="dash-block-actions">
+        {actions}
+        <button type="button" className="dash-block-remove" onClick={onRemove} title="Убрать блок" aria-label="Убрать блок">×</button>
+      </div>
+    </header>
+  );
+}
 
 export function DashboardView({ onEdit }: Props) {
   const tasks = useTasks();
   const spheres = useSpheres();
-  const topics = useTopics();
+  const tree = useTopics();
   const photos = useBoardPhotos();
   const notes = useBoardNotes();
 
-  const [sel, setSel] = useState<Selection>(() => ({ sphere: spheres[0] ?? '', topic: null }));
+  const [sel, setSel] = useState<Selection>(() => ({ sphere: spheres[0] ?? '', path: [] }));
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
-    spheres[0] ? { [spheres[0]]: true } : {},
+    spheres[0] ? { [nodeKeyOf(spheres[0], [])]: true } : {},
   );
+  const [adding, setAdding] = useState<{ sphere: string; path: string[] } | null>(null);
+  const [draftName, setDraftName] = useState('');
+  const [creatingCategory, setCreatingCategory] = useState(false);
+  const [newCategory, setNewCategory] = useState('');
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [addingTask, setAddingTask] = useState(false);
-  const [creatingSphere, setCreatingSphere] = useState(false);
-  const [newSphere, setNewSphere] = useState('');
-  const [creatingTopic, setCreatingTopic] = useState(false);
-  const [newTopic, setNewTopic] = useState('');
-  const [renameTarget, setRenameTarget] = useState<DragKind | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<'sphere' | 'topic' | null>(null);
-
-  // Drag state: categories/topics reorder, tasks can be dropped on a node.
-  const dragRef = useRef<DragPayload | null>(null);
-  const [dragging, setDragging] = useState<{ kind: DragKind; value: string } | null>(null);
-  const [over, setOver] = useState<{ kind: DragKind; value: string } | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [overNode, setOverNode] = useState<string | null>(null);
+  const dragRef = useRef<{ kind: 'category' | 'folder'; id: string; name: string; sphere: string; parentPath: string[] } | null>(null);
 
   const [noteDraft, setNoteDraft] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -166,189 +211,161 @@ export function DashboardView({ onEdit }: Props) {
     return () => window.clearTimeout(id);
   }, [boardError]);
 
-  // Keep the selection valid when categories/topics come and go (another
-  // device may delete them while this tab is open).
+  // Entries made before the dashboard had nodes carry no nodeKey: park them in
+  // the first category so nothing disappears.
+  useEffect(() => {
+    if (!spheres.length) return;
+    claimOrphans(nodeKeyOf(spheres[0], []));
+  }, [spheres]);
+
+  // Keep the selection valid when categories/folders vanish (deleted here or
+  // on the other device).
   useEffect(() => {
     if (!spheres.length) {
-      if (sel.sphere) setSel({ sphere: '', topic: null });
+      if (sel.sphere) setSel({ sphere: '', path: [] });
       return;
     }
-    if (!spheres.includes(sel.sphere)) setSel({ sphere: spheres[0], topic: null });
-  }, [spheres, sel.sphere]);
-
-  useEffect(() => {
-    if (!sel.sphere || !sel.topic) return;
-    const list = topics[sel.sphere] ?? [];
-    if (sel.topic !== DEFAULT_TOPIC && !list.includes(sel.topic)) {
-      setSel({ sphere: sel.sphere, topic: null });
+    if (!spheres.includes(sel.sphere)) {
+      setSel({ sphere: spheres[0], path: [] });
+      return;
     }
-  }, [topics, sel.sphere, sel.topic]);
+    if (!sel.path.length) return;
+    let path = sel.path;
+    while (path.length && !nodeAt(tree[sel.sphere]?.children ?? [], path)) path = path.slice(0, -1);
+    if (path.length !== sel.path.length) setSel({ sphere: sel.sphere, path });
+  }, [spheres, tree, sel.sphere, sel.path]);
 
   const counts = useMemo(() => {
     const bySphere: Record<string, number> = {};
-    const byTopic: Record<string, number> = {};
+    const byNode: Record<string, number> = {};
     for (const task of tasks) {
       if (task.startDate || !task.sphere || task.completed) continue;
       bySphere[task.sphere] = (bySphere[task.sphere] ?? 0) + 1;
-      const key = `${task.sphere}\u0000${task.topic || DEFAULT_TOPIC}`;
-      byTopic[key] = (byTopic[key] ?? 0) + 1;
+      const parts = keyPath(task.topic);
+      for (let i = 1; i <= parts.length; i++) {
+        const key = nodeKeyOf(task.sphere, parts.slice(0, i));
+        byNode[key] = (byNode[key] ?? 0) + 1;
+      }
     }
-    return { bySphere, byTopic };
+    return { bySphere, byNode };
   }, [tasks]);
 
-  const topicCount = (sphere: string, topic: string) => counts.byTopic[`${sphere}\u0000${topic}`] ?? 0;
+  const category = tree[sel.sphere];
+  const current: TreeNode | null = sel.path.length ? nodeAt(category?.children ?? [], sel.path) : null;
+  const blocks: BlockKind[] = sel.path.length
+    ? (current?.blocks ?? [])
+    : (category?.blocks ?? ['tasks']);
+  const nodeKey = nodeKeyOf(sel.sphere, sel.path);
+  const topicKey = sel.path.length ? pathKey(sel.path) : undefined;
 
-  const list = sortByPriority(tasks.filter((task) => {
-    if (task.startDate || !task.sphere || task.completed) return false;
-    if (task.sphere !== sel.sphere) return false;
-    if (sel.topic !== null) return (task.topic || DEFAULT_TOPIC) === sel.topic;
-    return true;
-  }));
+  const nodeNotes = useMemo(() => notes.filter((note) => note.nodeKey === nodeKey), [notes, nodeKey]);
+  const nodePhotos = useMemo(() => photos.filter((photo) => photo.nodeKey === nodeKey), [photos, nodeKey]);
+  const list = useMemo(
+    () => sortByPriority(tasks.filter((task) => {
+      if (task.startDate || !task.sphere || task.completed) return false;
+      if (task.sphere !== sel.sphere) return false;
+      return inSubtree(task.topic, sel.path);
+    })),
+    [tasks, sel.sphere, sel.path],
+  );
 
-  const select = (sphere: string, topic: string | null) => {
-    setSel({ sphere, topic });
+  const canNest = (path: string[]) => path.length + 1 <= MAX_LEVEL - 1;
+
+  const select = (sphere: string, path: string[]) => {
+    setSel({ sphere, path });
     setAddingTask(false);
-    setConfirmDelete(null);
-    setRenameTarget(null);
-    setCreatingTopic(false);
-    setExpanded((prev) => ({ ...prev, [sphere]: true }));
+    setPaletteOpen(false);
+    setRenaming(false);
+    setConfirmDelete(false);
+    setAdding(null);
+    setExpanded((prev) => {
+      const next = { ...prev, [nodeKeyOf(sphere, [])]: true };
+      for (let i = 1; i <= path.length; i++) next[nodeKeyOf(sphere, path.slice(0, i))] = true;
+      return next;
+    });
   };
 
-  const toggleExpanded = (sphere: string) =>
-    setExpanded((prev) => ({ ...prev, [sphere]: !prev[sphere] }));
+  const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
 
-  const commitSphere = () => {
-    const name = newSphere.trim();
+  const startAdd = (sphere: string, parentPath: string[]) => {
+    setAdding({ sphere, path: parentPath });
+    setDraftName('');
+    setExpanded((prev) => {
+      const next = { ...prev };
+      for (let i = 0; i <= parentPath.length; i++) next[nodeKeyOf(sphere, parentPath.slice(0, i))] = true;
+      return next;
+    });
+  };
+
+  const commitAdd = () => {
+    if (!adding) return;
+    const name = draftName.trim();
+    if (name) {
+      const siblings = adding.path.length
+        ? (nodeAt(tree[adding.sphere]?.children ?? [], adding.path)?.children ?? [])
+        : (tree[adding.sphere]?.children ?? []);
+      if (!siblings.some((node) => node.name === name)) {
+        store.addTopic(adding.sphere, name, adding.path);
+        select(adding.sphere, [...adding.path, name]);
+      }
+    }
+    setAdding(null);
+    setDraftName('');
+  };
+
+  const commitCategory = () => {
+    const name = newCategory.trim();
     if (name && !spheres.includes(name)) {
       store.addSphere(name);
-      setSel({ sphere: name, topic: null });
-      setExpanded((prev) => ({ ...prev, [name]: true }));
+      select(name, []);
     }
-    setNewSphere('');
-    setCreatingSphere(false);
+    setNewCategory('');
+    setCreatingCategory(false);
   };
 
-  const commitTopic = (sphere: string) => {
-    const name = newTopic.trim();
-    if (name) {
-      store.addTopic(sphere, name);
-      setSel({ sphere, topic: name });
-    }
-    setNewTopic('');
-    setCreatingTopic(false);
+  const addBlock = (kind: BlockKind) => {
+    store.setBlocks(sel.sphere, sel.path, [...blocks, kind]);
+    setPaletteOpen(false);
   };
 
-  const reorderList = (list: string[]) =>
-    (dragged: string, target: string, place: 'above' | 'below') => {
-      if (dragged === target) return undefined;
-      const ids = list.filter((id) => id !== dragged);
-      let at = ids.indexOf(target);
-      if (at < 0) at = ids.length;
-      else if (place === 'below') at += 1;
-      ids.splice(at, 0, dragged);
-      return ids;
-    };
-
-  const nodeDragProps = (payload: DragPayload) => ({
-    draggable: true,
-    onDragStart: (event: React.DragEvent) => {
-      dragRef.current = payload;
-      setDragging({ kind: payload.kind, value: payload.value });
-      event.dataTransfer.effectAllowed = 'move';
-      event.dataTransfer.setData(`text/${payload.kind}-node`, payload.value);
-    },
-    onDragEnd: () => {
-      dragRef.current = null;
-      setDragging(null);
-      setOver(null);
-    },
-    onDragOver: (event: React.DragEvent) => {
-      if (event.dataTransfer.types.includes('text/task-id')) {
-        event.preventDefault();
-        event.stopPropagation();
-        event.dataTransfer.dropEffect = 'move';
-        setOver({ kind: payload.kind, value: payload.value });
-        return;
-      }
-      const active = dragRef.current;
-      if (!active || active.kind !== payload.kind || active.value === payload.value) return;
-      if (active.kind === 'topic' && active.sphere !== payload.sphere) return;
-      event.preventDefault();
-      event.stopPropagation();
-      event.dataTransfer.dropEffect = 'move';
-      setOver({ kind: payload.kind, value: payload.value });
-    },
-    onDragLeave: (event: React.DragEvent) => {
-      const r = event.currentTarget.getBoundingClientRect();
-      const { clientX: x, clientY: y } = event;
-      if (x < r.left || x >= r.right || y < r.top || y >= r.bottom) {
-        setOver((prev) => (prev?.kind === payload.kind && prev.value === payload.value ? null : prev));
-      }
-    },
-    onDrop: (event: React.DragEvent) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const taskId = event.dataTransfer.getData('text/task-id');
-      if (taskId) {
-        store.update(taskId, {
-          sphere: payload.sphere,
-          topic: payload.kind === 'topic' && payload.value !== DEFAULT_TOPIC ? payload.value : undefined,
-          unplanned: false,
-        });
-        setOver(null);
-        return;
-      }
-      const active = dragRef.current;
-      if (active) {
-        if (active.kind === 'sphere' && payload.kind === 'sphere') {
-          const ids = reorderList(spheres)(active.value, payload.value, 'below');
-          if (ids) store.reorderSpheres(ids);
-        } else if (active.kind === 'topic' && payload.kind === 'topic' && active.sphere === payload.sphere) {
-          const ids = reorderList(topics[payload.sphere] ?? [])(active.value, payload.value, 'below');
-          if (ids) store.reorderTopics(payload.sphere, ids);
-        }
-      }
-      dragRef.current = null;
-      setDragging(null);
-      setOver(null);
-    },
-  });
-
-  const isOver = (kind: DragKind, value: string) => over?.kind === kind && over.value === value;
+  const removeBlock = (kind: BlockKind) => {
+    store.setBlocks(sel.sphere, sel.path, blocks.filter((block) => block !== kind));
+  };
 
   const commitRename = (value: string) => {
     const name = value.trim();
-    if (!name || !sel.sphere) {
-      setRenameTarget(null);
+    setRenaming(false);
+    if (!name || !sel.sphere) return;
+    if (!sel.path.length) {
+      if (name !== sel.sphere) {
+        store.renameSphere(sel.sphere, name);
+        setSel((prev) => ({ ...prev, sphere: name }));
+      }
       return;
     }
-    if (renameTarget === 'sphere' && name !== sel.sphere) {
-      store.renameSphere(sel.sphere, name);
-      setSel((prev) => ({ ...prev, sphere: name }));
-      setExpanded((prev) => ({ ...prev, [name]: true }));
-    }
-    if (renameTarget === 'topic' && sel.topic && name !== sel.topic) {
-      store.renameTopic(sel.sphere, sel.topic, name);
-      setSel((prev) => ({ ...prev, topic: name }));
-    }
-    setRenameTarget(null);
+    if (name === sel.path[sel.path.length - 1]) return;
+    store.renameTopic(sel.sphere, sel.path, name);
+    setSel((prev) => ({ ...prev, path: [...prev.path.slice(0, -1), name] }));
   };
 
   const deleteSelected = () => {
-    if (confirmDelete === 'topic' && sel.topic) {
-      store.removeTopic(sel.sphere, sel.topic);
-      setSel({ sphere: sel.sphere, topic: null });
-    } else if (confirmDelete === 'sphere' && sel.sphere) {
+    setConfirmDelete(false);
+    if (!sel.sphere) return;
+    if (!sel.path.length) {
       store.removeSphere(sel.sphere);
-      setSel({ sphere: '', topic: null });
+      setSel({ sphere: '', path: [] });
+      return;
     }
-    setConfirmDelete(null);
+    store.removeTopic(sel.sphere, sel.path);
+    // Notes and pictures of the deleted folder move one level up instead of
+    // becoming unreachable.
+    rekeyNode(nodeKeyOf(sel.sphere, sel.path), nodeKeyOf(sel.sphere, sel.path.slice(0, -1)));
+    setSel({ sphere: sel.sphere, path: sel.path.slice(0, -1) });
   };
 
   const submitNote = () => {
     if (!noteDraft.trim()) return;
-    const color = NOTE_COLORS[notes.length % NOTE_COLORS.length];
-    addBoardNote(noteDraft, color);
+    addBoardNote(noteDraft, NOTE_COLORS[nodeNotes.length % NOTE_COLORS.length], nodeKey);
     setNoteDraft('');
   };
 
@@ -360,7 +377,7 @@ export function DashboardView({ onEdit }: Props) {
       for (const file of Array.from(files)) {
         if (!file.type.startsWith('image/')) continue;
         const data = await fileToDataUrl(file);
-        const result = addBoardPhoto(data);
+        const result = addBoardPhoto(data, '', nodeKey);
         if (!result.ok) {
           setBoardError(result.message);
           break;
@@ -373,315 +390,514 @@ export function DashboardView({ onEdit }: Props) {
     }
   };
 
-  const quickTopic = sel.topic ?? DEFAULT_TOPIC;
-  const photo = (value: string | null) => photos.find((item) => item.id === value);
+  const dropTask = (event: DragEvent, sphere: string, path: string[]): boolean => {
+    const taskId = event.dataTransfer.getData('text/task-id');
+    if (!taskId) return false;
+    store.update(taskId, {
+      sphere,
+      topic: path.length ? pathKey(path) : undefined,
+      unplanned: false,
+    });
+    return true;
+  };
+
+  const rowDragProps = (payload: { kind: 'category' | 'folder'; id: string; name: string; sphere: string; parentPath: string[] }) => ({
+    draggable: true,
+    onDragStart: (event: DragEvent) => {
+      dragRef.current = payload;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/node-id', payload.id);
+    },
+    onDragEnd: () => {
+      dragRef.current = null;
+      setOverNode(null);
+    },
+    onDragOver: (event: DragEvent) => {
+      if (event.dataTransfer.types.includes('text/task-id')) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = 'move';
+        setOverNode(payload.id);
+        return;
+      }
+      const active = dragRef.current;
+      if (!active || active.id === payload.id || active.kind !== payload.kind) return;
+      if (
+        active.kind === 'folder'
+        && (active.sphere !== payload.sphere || pathKey(active.parentPath) !== pathKey(payload.parentPath))
+      ) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = 'move';
+      setOverNode(payload.id);
+    },
+    onDragLeave: (event: DragEvent) => {
+      const rect = event.currentTarget.getBoundingClientRect();
+      const { clientX: x, clientY: y } = event;
+      if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) {
+        setOverNode((prev) => (prev === payload.id ? null : prev));
+      }
+    },
+    onDrop: (event: DragEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      // The path is built from NAMES (tasks reference names), never from ids.
+      const path = payload.kind === 'category' ? [] : [...payload.parentPath, payload.name];
+      if (dropTask(event, payload.sphere, path)) {
+        setOverNode(null);
+        return;
+      }
+      const active = dragRef.current;
+      if (active && active.kind === payload.kind && active.id !== payload.id) {
+        if (active.kind === 'category') {
+          setOverNode(null);
+          dragRef.current = null;
+          store.reorderSpheres(reorderIds(spheres, active.id, payload.id));
+          return;
+        }
+        if (active.sphere === payload.sphere) {
+          const siblings = (nodeAt(tree[payload.sphere]?.children ?? [], active.parentPath)?.children ?? [])
+            .map((node) => node.id);
+          store.reorderTopics(payload.sphere, reorderIds(siblings, active.id, payload.id), active.parentPath);
+        }
+      }
+      dragRef.current = null;
+      setOverNode(null);
+    },
+  });
+
+  const renderFolders = (sphere: string, nodes: TreeNode[], parentPath: string[], depth: number): ReactNode => (
+    <>
+      {nodes.map((node) => {
+        const path = [...parentPath, node.name];
+        const key = nodeKeyOf(sphere, path);
+        const open = !!expanded[key];
+        const active = sel.sphere === sphere && pathKey(sel.path) === pathKey(path);
+        const count = counts.byNode[key] ?? 0;
+        const can = canNest(path);
+        return (
+          <div className="dash-node" key={node.id}>
+            <div
+              className={[
+                'dash-node-row',
+                'dash-folder-row',
+                active ? 'active' : '',
+                overNode === node.id ? 'drop' : '',
+              ].join(' ')}
+              style={{ paddingLeft: 4 + depth * 10 }}
+              onClick={() => select(sphere, path)}
+              {...rowDragProps({ kind: 'folder', id: node.id, name: node.name, sphere, parentPath })}
+            >
+              <button
+                type="button"
+                className={`dash-chev ${open ? 'open' : ''}`}
+                onClick={(event) => { event.stopPropagation(); toggle(key); }}
+                aria-label={open ? 'Свернуть' : 'Показать вложенные папки'}
+                title={open ? 'Свернуть' : 'Вложенные папки'}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+                  <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+              <span className="dash-node-name">{node.name}</span>
+              {count > 0 && <span className="dash-node-count">{count}</span>}
+              {can && (
+                <button
+                  type="button"
+                  className="dash-node-plus"
+                  onClick={(event) => { event.stopPropagation(); startAdd(sphere, path); }}
+                  aria-label="Вложенная папка"
+                  title="Вложенная папка"
+                >+</button>
+              )}
+            </div>
+            {open && node.children.length > 0 && renderFolders(sphere, node.children, path, depth + 1)}
+            {open && adding && adding.sphere === sphere && pathKey(adding.path) === pathKey(path) && (
+              <input
+                autoFocus
+                className="dash-sub-input"
+                style={{ marginLeft: 8 + (depth + 1) * 10 }}
+                value={draftName}
+                placeholder="папка"
+                onChange={(event) => setDraftName(event.target.value)}
+                onBlur={commitAdd}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') commitAdd();
+                  if (event.key === 'Escape') { setAdding(null); setDraftName(''); }
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+
+  const blockKinds: BlockKind[] = ['tasks', 'notes', 'moodboard'];
+  const missing = blockKinds.filter((kind) => !blocks.includes(kind));
+  const photo = (value: string | null) => nodePhotos.find((item) => item.id === value);
 
   return (
     <div className="dashboard">
-      <aside className="dash-rail" aria-label="Категории">
+      <aside className="dash-rail" aria-label="Категории и папки">
         <div className="dash-rail-head">
           <span>категории</span>
-          <button type="button" className="dash-rail-add" onClick={() => setCreatingSphere(true)} aria-label="Новая категория" title="Новая категория">+</button>
+          <button type="button" className="dash-rail-add" onClick={() => setCreatingCategory(true)} aria-label="Новая категория" title="Новая категория">+</button>
         </div>
 
         <div className="dash-rail-list">
           {spheres.map((sphere) => {
-            const open = !!expanded[sphere];
-            const active = sel.sphere === sphere && sel.topic === null;
-            const sphereTopics = topics[sphere] ?? [];
+            const open = !!expanded[nodeKeyOf(sphere, [])];
+            const active = sel.sphere === sphere && !sel.path.length;
+            const count = counts.bySphere[sphere] ?? 0;
             return (
               <div className="dash-node" key={sphere}>
                 <div
                   className={[
                     'dash-node-row',
                     active ? 'active' : '',
-                    isOver('sphere', sphere) ? 'drop' : '',
-                    dragging?.kind === 'sphere' && dragging.value === sphere ? 'dragging' : '',
+                    overNode === sphere ? 'drop' : '',
                   ].join(' ')}
-                  onClick={() => select(sphere, null)}
-                  {...nodeDragProps({ kind: 'sphere', value: sphere, sphere })}
+                  onClick={() => select(sphere, [])}
+                  {...rowDragProps({ kind: 'category', id: sphere, name: sphere, sphere, parentPath: [] })}
                 >
                   <button
                     type="button"
                     className={`dash-chev ${open ? 'open' : ''}`}
-                    onClick={(event) => { event.stopPropagation(); toggleExpanded(sphere); }}
-                    aria-label={open ? 'Свернуть подкатегории' : 'Показать подкатегории'}
-                    title={open ? 'Свернуть' : 'Подкатегории'}
+                    onClick={(event) => { event.stopPropagation(); toggle(nodeKeyOf(sphere, [])); }}
+                    aria-label={open ? 'Свернуть папки' : 'Показать папки'}
+                    title={open ? 'Свернуть' : 'Папки'}
                   >
                     <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
                       <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
                     </svg>
                   </button>
                   <span className="dash-node-name">{sphere}</span>
-                  {(counts.bySphere[sphere] ?? 0) > 0 && (
-                    <span className="dash-node-count">{counts.bySphere[sphere]}</span>
+                  {count > 0 && <span className="dash-node-count">{count}</span>}
+                  {canNest([]) && (
+                    <button
+                      type="button"
+                      className="dash-node-plus"
+                      onClick={(event) => { event.stopPropagation(); startAdd(sphere, []); }}
+                      aria-label="Папка в категории"
+                      title="Папка в категории"
+                    >+</button>
                   )}
                 </div>
-
-                {open && (
-                  <div className="dash-sub">
-                    {[DEFAULT_TOPIC, ...sphereTopics].map((topic) => (
-                      <button
-                        key={topic}
-                        type="button"
-                        className={[
-                          'dash-sub-row',
-                          sel.sphere === sphere && sel.topic === topic ? 'active' : '',
-                          isOver('topic', topic) && sel.sphere === sphere ? 'drop' : '',
-                          dragging?.kind === 'topic' && dragging.value === topic ? 'dragging' : '',
-                        ].join(' ')}
-                        onClick={() => select(sphere, topic)}
-                        {...(topic === DEFAULT_TOPIC ? {} : nodeDragProps({ kind: 'topic', value: topic, sphere }))}
-                      >
-                        <span className="dash-sub-name">{topic}</span>
-                        {topicCount(sphere, topic) > 0 && (
-                          <span className="dash-sub-count">{topicCount(sphere, topic)}</span>
-                        )}
-                      </button>
-                    ))}
-                    {creatingTopic && sel.sphere === sphere ? (
-                      <input
-                        autoFocus
-                        className="dash-sub-input"
-                        value={newTopic}
-                        placeholder="подкатегория"
-                        onChange={(event) => setNewTopic(event.target.value)}
-                        onBlur={() => commitTopic(sphere)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') commitTopic(sphere);
-                          if (event.key === 'Escape') { setNewTopic(''); setCreatingTopic(false); }
-                        }}
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        className="dash-sub-add"
-                        onClick={() => { select(sphere, null); setCreatingTopic(true); }}
-                      >
-                        + подкатегория
-                      </button>
-                    )}
-                  </div>
+                {open && renderFolders(sphere, tree[sphere]?.children ?? [], [], 1)}
+                {open && adding && adding.sphere === sphere && !adding.path.length && (
+                  <input
+                    autoFocus
+                    className="dash-sub-input"
+                    value={draftName}
+                    placeholder="папка"
+                    onChange={(event) => setDraftName(event.target.value)}
+                    onBlur={commitAdd}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') commitAdd();
+                      if (event.key === 'Escape') { setAdding(null); setDraftName(''); }
+                    }}
+                  />
                 )}
               </div>
             );
           })}
 
-          {creatingSphere && (
+          {creatingCategory && (
             <input
               autoFocus
               className="dash-rail-input"
-              value={newSphere}
+              value={newCategory}
               placeholder="категория"
-              onChange={(event) => setNewSphere(event.target.value)}
-              onBlur={commitSphere}
+              onChange={(event) => setNewCategory(event.target.value)}
+              onBlur={commitCategory}
               onKeyDown={(event) => {
-                if (event.key === 'Enter') commitSphere();
-                if (event.key === 'Escape') { setNewSphere(''); setCreatingSphere(false); }
+                if (event.key === 'Enter') commitCategory();
+                if (event.key === 'Escape') { setNewCategory(''); setCreatingCategory(false); }
               }}
             />
           )}
 
-          {!spheres.length && !creatingSphere && (
-            <button type="button" className="dash-rail-empty" onClick={() => setCreatingSphere(true)}>
+          {!spheres.length && !creatingCategory && (
+            <button type="button" className="dash-rail-empty" onClick={() => setCreatingCategory(true)}>
               пока пусто — создай первую категорию
             </button>
           )}
         </div>
 
-        <div className="dash-rail-hint">перетащи задачу на категорию или подкатегорию, чтобы перенести</div>
+        <div className="dash-rail-hint">
+          внутри категории до {MAX_LEVEL} уровней: категория → папка → папка.
+          задачу можно перетащить на любой уровень.
+        </div>
       </aside>
 
       <div className="dash-main">
-        <section className="dash-panel dash-tasks">
-          <header className="dash-panel-head">
+        <section className="dash-page">
+          <header className="dash-page-head">
             {sel.sphere ? (
               <>
-                {renameTarget === 'sphere' ? (
-                  <input
-                    autoFocus
-                    className="dash-rename"
-                    defaultValue={sel.sphere}
-                    onBlur={(event) => commitRename(event.currentTarget.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') event.currentTarget.blur();
-                      if (event.key === 'Escape') { event.currentTarget.value = sel.sphere; event.currentTarget.blur(); }
-                    }}
-                  />
-                ) : (
-                  <button type="button" className="dash-crumb" onClick={() => setRenameTarget('sphere')} title="Переименовать">
-                    {sel.sphere}
-                  </button>
-                )}
-                {sel.topic && (
-                  <>
-                    <span className="dash-crumb-sep">/</span>
-                    {renameTarget === 'topic' ? (
-                      <input
-                        autoFocus
-                        className="dash-rename"
-                        defaultValue={sel.topic}
-                        onBlur={(event) => commitRename(event.currentTarget.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') event.currentTarget.blur();
-                          if (event.key === 'Escape') { event.currentTarget.value = sel.topic ?? ''; event.currentTarget.blur(); }
-                        }}
-                      />
-                    ) : (
-                      <button type="button" className="dash-crumb" onClick={() => setRenameTarget('topic')} title="Переименовать">
-                        {sel.topic}
+                <div className="dash-crumbs">
+                  {renaming ? (
+                    <input
+                      autoFocus
+                      className="dash-rename"
+                      defaultValue={sel.path.length ? sel.path[sel.path.length - 1] : sel.sphere}
+                      onBlur={(event) => commitRename(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') event.currentTarget.blur();
+                        if (event.key === 'Escape') {
+                          event.currentTarget.value = sel.path.length ? sel.path[sel.path.length - 1] : sel.sphere;
+                          event.currentTarget.blur();
+                        }
+                      }}
+                    />
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="dash-crumb"
+                        onClick={() => (sel.path.length ? select(sel.sphere, []) : setRenaming(true))}
+                        title={sel.path.length ? 'К категории' : 'Переименовать категорию'}
+                      >
+                        {sel.sphere}
                       </button>
-                    )}
-                  </>
-                )}
-                <span className="dash-panel-count">{list.length}</span>
-                <div className="dash-panel-actions">
+                      {sel.path.map((name, at) => {
+                        const path = sel.path.slice(0, at + 1);
+                        const last = at === sel.path.length - 1;
+                        return (
+                          <span className="dash-crumb-group" key={`${name}-${at}`}>
+                            <span className="dash-crumb-sep">/</span>
+                            <button
+                              type="button"
+                              className={`dash-crumb ${last ? 'last' : ''}`}
+                              onClick={() => (last ? setRenaming(true) : select(sel.sphere, path))}
+                              title={last ? 'Переименовать' : 'К этой папке'}
+                            >
+                              {name}
+                            </button>
+                          </span>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
+
+                <span className="dash-page-count">{list.length}</span>
+
+                <div className="dash-page-actions">
+                  {missing.length > 0 && (
+                    <div className="dash-add-wrap">
+                      <button
+                        type="button"
+                        className="dash-add-block"
+                        onClick={() => setPaletteOpen((prev) => !prev)}
+                        aria-expanded={paletteOpen}
+                      >
+                        + блок
+                      </button>
+                      {paletteOpen && (
+                        <>
+                          <div className="dash-palette-backdrop" onClick={() => setPaletteOpen(false)} />
+                          <div className="dash-palette" role="menu">
+                            {missing.map((kind) => (
+                              <button
+                                key={kind}
+                                type="button"
+                                className="dash-palette-item"
+                                role="menuitem"
+                                onClick={() => addBlock(kind)}
+                              >
+                                <span className="dash-palette-name">{BLOCK_LABEL[kind]}</span>
+                                <span className="dash-palette-hint">{BLOCK_HINT[kind]}</span>
+                              </button>
+                            ))}
+                            {canNest(sel.path) && (
+                              <button
+                                type="button"
+                                className="dash-palette-item"
+                                role="menuitem"
+                                onClick={() => { setPaletteOpen(false); startAdd(sel.sphere, sel.path); }}
+                              >
+                                <span className="dash-palette-name">папка</span>
+                                <span className="dash-palette-hint">вложенная папка внутри этой</span>
+                              </button>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {canNest(sel.path) && (
+                    <button type="button" className="dash-muted" onClick={() => startAdd(sel.sphere, sel.path)}>+ папка</button>
+                  )}
                   {confirmDelete ? (
                     <>
                       <button type="button" className="dash-danger" onClick={deleteSelected}>
-                        {confirmDelete === 'topic' ? 'удалить подкатегорию' : 'удалить категорию'}
+                        {sel.path.length ? 'удалить папку' : 'удалить категорию'}
                       </button>
-                      <button type="button" className="dash-muted" onClick={() => setConfirmDelete(null)}>отмена</button>
+                      <button type="button" className="dash-muted" onClick={() => setConfirmDelete(false)}>отмена</button>
                     </>
                   ) : (
-                    <button
-                      type="button"
-                      className="dash-muted"
-                      onClick={() => setConfirmDelete(sel.topic ? 'topic' : 'sphere')}
-                    >
-                      {sel.topic ? 'удалить' : 'удалить категорию'}
-                    </button>
+                    <button type="button" className="dash-muted" onClick={() => setConfirmDelete(true)}>удалить</button>
                   )}
                 </div>
               </>
             ) : (
-              <span className="dash-panel-title">задачи</span>
+              <span className="dash-panel-title">дашборд</span>
             )}
           </header>
 
           {sel.sphere ? (
-            <div
-              className="sphere-tasks"
-              onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }}
-              onDrop={(event) => {
-                event.preventDefault();
-                const id = event.dataTransfer.getData('text/task-id');
-                if (!id) return;
-                store.update(id, {
-                  sphere: sel.sphere,
-                  topic: sel.topic && sel.topic !== DEFAULT_TOPIC ? sel.topic : undefined,
-                  unplanned: false,
-                });
-              }}
-            >
-              {list.map((task) => (
-                <TaskItem
-                  key={task.id}
-                  task={task}
-                  onEdit={() => onEdit(task)}
-                  onReorder={makeReorderInTopic(tasks, sel.sphere, quickTopic, list)}
-                />
-              ))}
-              {addingTask ? (
-                <QuickAdd sphere={sel.sphere} topic={quickTopic} onDone={() => setAddingTask(false)} />
-              ) : (
-                <div className="add-line" onClick={() => setAddingTask(true)}>+ задача</div>
-              )}
-              {!list.length && !addingTask && (
-                <div className="dash-hint-line">
-                  {sel.topic ? 'в этой подкатегории пока пусто' : 'в этой категории пока нет задач'}
+            <div className="dash-blocks">
+              {blocks.map((kind) => {
+                if (kind === 'tasks') {
+                  return (
+                    <section className="dash-block dash-block-tasks" key="tasks">
+                      <BlockHead title="задачи" count={list.length} onRemove={() => removeBlock('tasks')} />
+                      <div
+                        className="sphere-tasks"
+                        onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          dropTask(event, sel.sphere, sel.path);
+                        }}
+                      >
+                        {list.map((task) => (
+                          <TaskItem
+                            key={task.id}
+                            task={task}
+                            onEdit={() => onEdit(task)}
+                            onReorder={makeReorderInNode(tasks, sel.sphere, topicKey, list)}
+                          />
+                        ))}
+                        {addingTask ? (
+                          <QuickAdd sphere={sel.sphere} topic={topicKey} onDone={() => setAddingTask(false)} />
+                        ) : (
+                          <div className="add-line" onClick={() => setAddingTask(true)}>+ задача</div>
+                        )}
+                        {!list.length && !addingTask && (
+                          <div className="dash-hint-line">в этом месте пока нет задач</div>
+                        )}
+                      </div>
+                    </section>
+                  );
+                }
+                if (kind === 'notes') {
+                  return (
+                    <section className="dash-block dash-block-notes" key="notes">
+                      <BlockHead title="заметки" count={nodeNotes.length} onRemove={() => removeBlock('notes')} />
+                      <div className="dash-note-new">
+                        <textarea
+                          value={noteDraft}
+                          placeholder="новая заметка — Enter, чтобы добавить"
+                          rows={2}
+                          onChange={(event) => setNoteDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' && !event.shiftKey) {
+                              event.preventDefault();
+                              submitNote();
+                            }
+                          }}
+                        />
+                        <button type="button" className="dash-note-add" onClick={submitNote} disabled={!noteDraft.trim()} aria-label="Добавить заметку">+</button>
+                      </div>
+                      <div className="dash-note-list">
+                        {nodeNotes.map((note) => (
+                          <NoteCard key={note.id} id={note.id} text={note.text} color={note.color} />
+                        ))}
+                        {!nodeNotes.length && <div className="dash-hint-line">заметки, которые жалко потерять</div>}
+                      </div>
+                    </section>
+                  );
+                }
+                return (
+                  <section className="dash-block dash-block-board" key="moodboard">
+                    <BlockHead
+                      title="мудборд"
+                      count={nodePhotos.length}
+                      onRemove={() => removeBlock('moodboard')}
+                      actions={(
+                        <>
+                          <label className="dash-board-add">
+                            <input
+                              type="file"
+                              accept="image/*"
+                              multiple
+                              onChange={(event) => {
+                                const files = event.currentTarget.files;
+                                void onFiles(files);
+                                event.currentTarget.value = '';
+                              }}
+                            />
+                            {uploading ? 'добавляю…' : '+ фото'}
+                          </label>
+                          <button type="button" className="dash-muted" onClick={() => void syncBoard()} title="Обновить мудборд и заметки">⟳</button>
+                        </>
+                      )}
+                    />
+                    {nodePhotos.length ? (
+                      <div className="dash-board-grid">
+                        {nodePhotos.map((item) => (
+                          <figure className="dash-photo" key={item.id}>
+                            <img src={item.data} alt={item.caption || 'фото мудборда'} onClick={() => setLightbox(item.id)} />
+                            <button type="button" className="dash-photo-del" onClick={() => removeBoardItem(item.id)} aria-label="Удалить фото" title="Удалить">×</button>
+                            <input
+                              className="dash-photo-caption"
+                              defaultValue={item.caption}
+                              placeholder="подпись"
+                              onBlur={(event) => updateBoardPhoto(item.id, { caption: event.currentTarget.value })}
+                              onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+                            />
+                          </figure>
+                        ))}
+                      </div>
+                    ) : (
+                      <label className="dash-board-empty">
+                        <input
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          onChange={(event) => {
+                            const files = event.currentTarget.files;
+                            void onFiles(files);
+                            event.currentTarget.value = '';
+                          }}
+                        />
+                        <span>здесь собираются картинки, которые тебе нравятся</span>
+                        <span className="dash-board-empty-cta">{uploading ? 'добавляю…' : '+ добавить фото'}</span>
+                      </label>
+                    )}
+                    {boardError && <div className="dash-board-status">{boardError}</div>}
+                  </section>
+                );
+              })}
+
+              {!blocks.length && (
+                <div className="dash-empty">
+                  <div className="dash-empty-title">пока здесь пусто</div>
+                  <div className="dash-empty-text">
+                    добавь блок — задачи, заметки или мудборд — или вложенную папку.
+                  </div>
+                  <div className="dash-empty-actions">
+                    {blockKinds.map((kind) => (
+                      <button key={kind} type="button" className="dash-empty-btn" onClick={() => addBlock(kind)}>
+                        <span className="dash-empty-name">{BLOCK_LABEL[kind]}</span>
+                        <span className="dash-empty-hint">{BLOCK_HINT[kind]}</span>
+                      </button>
+                    ))}
+                    {canNest(sel.path) && (
+                      <button type="button" className="dash-empty-btn" onClick={() => startAdd(sel.sphere, sel.path)}>
+                        <span className="dash-empty-name">папка</span>
+                        <span className="dash-empty-hint">вложенная папка внутри этой</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
           ) : (
-            <div className="dash-hint-line">создай категорию слева — задачи собираются в неё</div>
+            <div className="dash-hint-line">создай категорию слева — внутри неё собираются блоки</div>
           )}
-        </section>
-
-        <section className="dash-panel dash-notes">
-          <header className="dash-panel-head">
-            <span className="dash-panel-title">заметки</span>
-            <span className="dash-panel-count">{notes.length}</span>
-          </header>
-          <div className="dash-note-new">
-            <textarea
-              value={noteDraft}
-              placeholder="новая заметка — Enter, чтобы добавить"
-              rows={2}
-              onChange={(event) => setNoteDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  submitNote();
-                }
-              }}
-            />
-            <button type="button" className="dash-note-add" onClick={submitNote} disabled={!noteDraft.trim()} aria-label="Добавить заметку">+</button>
-          </div>
-          <div className="dash-note-list">
-            {notes.map((note) => (
-              <NoteCard key={note.id} id={note.id} text={note.text} color={note.color} />
-            ))}
-            {!notes.length && <div className="dash-hint-line">заметки, которые жалко потерять</div>}
-          </div>
-        </section>
-
-        <section className="dash-panel dash-board">
-          <header className="dash-panel-head">
-            <span className="dash-panel-title">мудборд</span>
-            <span className="dash-panel-count">{photos.length}</span>
-            <div className="dash-panel-actions">
-              <label className="dash-board-add">
-                <input
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  onChange={(event) => {
-                    const files = event.currentTarget.files;
-                    void onFiles(files);
-                    event.currentTarget.value = '';
-                  }}
-                />
-                {uploading ? 'добавляю…' : '+ фото'}
-              </label>
-              <button type="button" className="dash-muted" onClick={() => void syncBoard()} title="Обновить мудборд и заметки">⟳</button>
-            </div>
-          </header>
-
-          {photos.length ? (
-            <div className="dash-board-grid">
-              {photos.map((item) => (
-                <figure className="dash-photo" key={item.id}>
-                  <img src={item.data} alt={item.caption || 'фото мудборда'} onClick={() => setLightbox(item.id)} />
-                  <button type="button" className="dash-photo-del" onClick={() => removeBoardItem(item.id)} aria-label="Удалить фото" title="Удалить">×</button>
-                  <input
-                    className="dash-photo-caption"
-                    defaultValue={item.caption}
-                    placeholder="подпись"
-                    onBlur={(event) => updateBoardPhoto(item.id, { caption: event.currentTarget.value })}
-                    onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
-                  />
-                </figure>
-              ))}
-            </div>
-          ) : (
-            <label className="dash-board-empty">
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={(event) => {
-                  const files = event.currentTarget.files;
-                  void onFiles(files);
-                  event.currentTarget.value = '';
-                }}
-              />
-              <span>здесь собираются картинки, которые тебе нравятся</span>
-              <span className="dash-board-empty-cta">{uploading ? 'добавляю…' : '+ добавить фото'}</span>
-            </label>
-          )}
-
-          {boardError && <div className="dash-board-status">{boardError}</div>}
         </section>
       </div>
 

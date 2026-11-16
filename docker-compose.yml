@@ -6,11 +6,19 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:80"
+      # HTTPS-порт сервера. Внутри контейнера nginx слушает 443 и отдаёт
+      # /luna-calendar-secure/ вместе с прокси /luna-calendar-secure/sb/.
+      # НЕ меняйте на 8080:80 — порт 8080 на хосте занят kanboard, и контейнер
+      # не поднимется (Bind for 0.0.0.0:8080 failed: port is already allocated).
+      - "18543:443"
+    volumes:
+      # Сертификаты Let's Encrypt (только чтение)
+      - /etc/letsencrypt:/etc/nginx/certs:ro
+      # Конфиг nginx с HTTPS и прокси на Supabase
+      - ./nginx-https.conf:/etc/nginx/conf.d/default.conf:ro
     restart: unless-stopped
-    # healthcheck — опционально, чтобы Docker следил за живостью
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "/dev/null", "https://127.0.0.1/luna-calendar-secure/"]
       interval: 30s
       timeout: 5s
       retries: 3

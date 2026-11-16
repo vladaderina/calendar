@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local reproduction harness for the sync race (не часть приложения)
+.hermes-synctest/
+
+# Output of the store sync test (test/build.sh + test/run.mjs)
+test/dist/
+test/.localstorage.json

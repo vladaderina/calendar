@@ -3078,16 +3078,189 @@ input, select, textarea { font-family: inherit; }
 }
 
 /* ── right side: tasks / notes / moodboard ── */
+/* The right side is ONE page card: breadcrumbs, "+ блок", then the blocks the
+   user added to this node (nothing at all for a fresh category/folder). */
 .dash-main {
-  display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
-  grid-template-areas:
-    "tasks notes"
-    "board board";
-  gap: 22px;
-  align-items: stretch;
+  display: block;
   min-width: 0;
 }
+.dash-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px 16px 18px;
+  background: var(--paper);
+  min-width: 0;
+}
+.dash-page-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1.5px solid var(--ink);
+  min-height: 32px;
+  flex-wrap: wrap;
+}
+.dash-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.dash-crumb-group { display: inline-flex; align-items: center; gap: 2px; min-width: 0; }
+.dash-page-count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.dash-page-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dash-blocks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
+  min-width: 0;
+}
+.dash-block {
+  flex: 1 1 340px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px 14px;
+  background: var(--paper);
+}
+.dash-block-tasks { flex: 1.4 1 380px; }
+.dash-block-board { flex: 1 1 100%; }
+.dash-block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.dash-block-title {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.dash-block-count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.dash-block-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.dash-block-remove {
+  width: 18px;
+  height: 18px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+.dash-block-remove:hover { color: #c33; background: #f7f7f8; }
+.dash-block-tasks .sphere-tasks { max-height: 54vh; overflow-y: auto; overflow-x: hidden; }
+
+/* "+ блок" palette */
+.dash-add-wrap { position: relative; }
+.dash-add-block {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px solid var(--ink);
+  border-radius: 999px;
+  padding: 4px 12px;
+  white-space: nowrap;
+}
+.dash-add-block:hover { background: var(--ink); color: var(--paper); }
+.dash-palette-backdrop { position: fixed; inset: 0; z-index: 40; }
+.dash-palette {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 41;
+  width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(10, 10, 12, 0.14);
+}
+.dash-palette-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+.dash-palette-item:hover { background: #f3f4f7; }
+.dash-palette-name { font-size: 13px; font-weight: 700; }
+.dash-palette-hint { font-size: 11px; color: var(--muted); line-height: 1.35; }
+
+/* empty node: no blocks yet */
+.dash-empty {
+  flex: 1 1 100%;
+  border: 1px dashed var(--line);
+  border-radius: 14px;
+  padding: 26px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  text-align: center;
+}
+.dash-empty-title { font-size: 15px; font-weight: 700; }
+.dash-empty-text { font-size: 12px; color: var(--muted); max-width: 340px; line-height: 1.45; }
+.dash-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.dash-empty-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  text-align: left;
+  border: 1px solid var(--ink);
+  border-radius: 10px;
+  padding: 8px 12px;
+  min-width: 132px;
+}
+.dash-empty-btn:hover { background: var(--ink); color: var(--paper); }
+.dash-empty-btn:hover .dash-empty-hint { color: rgba(255, 255, 255, 0.7); }
+.dash-empty-name { font-size: 13px; font-weight: 700; text-transform: lowercase; }
+.dash-empty-hint { font-size: 10px; color: var(--muted); line-height: 1.3; }
+
+/* folder rows in the rail */
+.dash-node-plus {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--muted);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.dash-node-row:hover .dash-node-plus { opacity: 1; }
+.dash-node-plus:hover { color: var(--ink); background: rgba(0, 0, 0, 0.05); }
+.dash-node-row.active .dash-node-plus { color: rgba(255, 255, 255, 0.8); }
+.dash-node-row.active .dash-node-plus:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
+.dash-node-row.dash-folder-row { padding-right: 6px; }
 .dash-panel {
   min-width: 0;
   display: flex;
@@ -3339,8 +3512,15 @@ input, select, textarea { font-family: inherit; }
       "board";
     gap: 16px;
   }
-  .dash-tasks .sphere-tasks { max-height: none; }
+  .dash-block-tasks .sphere-tasks { max-height: none; }
   .dash-note-list { max-height: none; }
+  .dash-page { padding: 12px 12px 14px; }
+  .dash-block { flex: 1 1 100%; padding: 10px 12px 12px; }
+  .dash-page-actions { gap: 8px; }
+  .dash-page-head { gap: 8px; }
+  .dash-empty-actions { flex-direction: column; align-items: stretch; }
+  .dash-empty-btn { min-width: 0; }
+  .dash-palette { width: 220px; right: -8px; }
   .dash-note-actions,
   .dash-photo-del { opacity: 1; }
   .dash-panel { padding: 12px 14px 14px; }

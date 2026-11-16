@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background subtle gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14171f" />
+      <stop offset="100%" stop-color="#090a0d" />
+    </linearGradient>
+
+    <!-- Top header band (accent red/coral aesthetic) -->
+    <linearGradient id="headerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ff4757" />
+      <stop offset="100%" stop-color="#ff6b81" />
+    </linearGradient>
+
+    <!-- Sheet paper gradient -->
+    <linearGradient id="paperGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#f5f6f8" />
+    </linearGradient>
+
+    <!-- Drop shadow for the calendar card -->
+    <filter id="cardShadow" x="-10%" y="-10%" width="125%" height="125%">
+      <feDropShadow dx="0" dy="16" stdDeviation="24" flood-color="#000000" flood-opacity="0.45" />
+    </filter>
+  </defs>
+
+  <!-- App icon base container (iOS squircle background) -->
+  <rect width="512" height="512" rx="116" fill="url(#bgGrad)" />
+
+  <!-- Subtle glow inside -->
+  <rect x="1" y="1" width="510" height="510" rx="115" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="2" />
+
+  <!-- Inner calendar card -->
+  <g filter="url(#cardShadow)">
+    <rect x="76" y="80" width="360" height="360" rx="42" fill="url(#paperGrad)" />
+  </g>
+
+  <!-- Calendar card header (Coral/Red top band) -->
+  <path d="M 76 122 A 42 42 0 0 1 118 80 L 394 80 A 42 42 0 0 1 436 122 L 436 170 L 76 170 Z" fill="url(#headerGrad)" />
+
+  <!-- Calendar binding pins / rings -->
+  <rect x="146" y="60" width="28" height="42" rx="14" fill="#2c2d30" />
+  <rect x="150" y="62" width="20" height="38" rx="10" fill="#f8f9fa" />
+
+  <rect x="338" y="60" width="28" height="42" rx="14" fill="#2c2d30" />
+  <rect x="342" y="62" width="20" height="38" rx="10" fill="#f8f9fa" />
+
+  <!-- Calendar month dots / accent indicator in header -->
+  <circle cx="256" cy="125" r="7" fill="rgba(255, 255, 255, 0.75)" />
+
+  <!-- Big Day Number (e.g. 14 / current date aesthetic) or Clean Checkmark + Day grid -->
+  <!-- Clean minimalist grid lines representation on paper -->
+  <line x1="120" y1="230" x2="392" y2="230" stroke="#e9ecef" stroke-width="6" stroke-linecap="round" />
+  <line x1="120" y1="285" x2="392" y2="285" stroke="#e9ecef" stroke-width="6" stroke-linecap="round" />
+  <line x1="120" y1="340" x2="392" y2="340" stroke="#e9ecef" stroke-width="6" stroke-linecap="round" />
+
+  <!-- Task items / highlights like in Tweek -->
+  <!-- Task 1: Coral checked task -->
+  <rect x="122" y="206" width="16" height="16" rx="5" fill="#ff4757" />
+  <line x1="154" y1="214" x2="280" y2="214" stroke="#1e293b" stroke-width="8" stroke-linecap="round" />
+
+  <!-- Task 2: Blue active task -->
+  <rect x="122" y="261" width="16" height="16" rx="5" fill="#2563eb" />
+  <line x1="154" y1="269" x2="340" y2="269" stroke="#1e293b" stroke-width="8" stroke-linecap="round" />
+
+  <!-- Task 3: Green bullet / task -->
+  <rect x="122" y="316" width="16" height="16" rx="5" fill="#10b981" />
+  <line x1="154" y1="324" x2="250" y2="324" stroke="#64748b" stroke-width="8" stroke-linecap="round" />
+
+  <!-- Bottom dot sphere indicators -->
+  <circle cx="340" cy="385" r="6" fill="#ff4757" />
+  <circle cx="360" cy="385" r="6" fill="#2563eb" />
+  <circle cx="380" cy="385" r="6" fill="#10b981" />
+</svg>

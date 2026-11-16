@@ -7,6 +7,26 @@ import { initAuth, getUserId } from './lib/auth';
 import { getColors, saveColors, colorsCustomized, isDefaultPalette, type TaskColor } from './config/colors';
 import { wheelJson, mergeWheel } from './lib/wheel';
 import { wheelNotesJson, mergeWheelNotes } from './lib/wheelNotes';
+import {
+  MAX_LEVEL,
+  emptyCategory,
+  inSubtree,
+  insertNode,
+  keyPath,
+  mapNode,
+  mergeTree,
+  newNode,
+  nodeAt,
+  normalizeTree,
+  pathExists,
+  pathKey,
+  removeNodeAt,
+  renamePrefix,
+  reorderLevel,
+  type BlockKind,
+  type Tree,
+  type TreeNode,
+} from './lib/tree';
 
 const TASKS_KEY = 'calendar.tasks.v1';
 const SPHERES_KEY = 'calendar.spheres.v1';
@@ -39,12 +59,14 @@ function loadSpheres(): string[] {
     return [...DEFAULT_SPHERES];
   }
 }
-function loadTopics(): Record<string, string[]> {
+// The dashboard's folder tree. Old profiles hold a flat `{ sphere: [name] }`
+// list; `normalizeTree` turns it into nodes that carry a tasks block, so the
+// categories the user already has keep showing their tasks.
+function loadTopics(): Tree {
   try {
     const raw = localStorage.getItem(TOPICS_KEY);
     if (!raw) return {};
-    const obj = JSON.parse(raw);
-    return typeof obj === 'object' && obj !== null ? obj : {};
+    return normalizeTree(JSON.parse(raw));
   } catch {
     return {};
   }
@@ -64,7 +86,7 @@ function loadView(): string {
 // ── In-memory state (always mirrors localStorage) ───────────────────────
 let tasks: Task[] = loadTasks();
 let spheres: string[] = loadSpheres();
-let topics: Record<string, string[]> = loadTopics();
+let topics: Tree = loadTopics();
 let journal: Record<string, string> = loadJournal();
 let lastView: string = loadView();
 
@@ -80,22 +102,69 @@ let lastView: string = loadView();
 //
 // Deleting a topic also clears `topic` on its tasks and renaming rewrites them,
 // so a restored tab is never a topic the user removed on purpose.
+function ensureTaskPath(tree: Tree, sphere: string, path: string[]): Tree {
+  const category = tree[sphere] ?? emptyCategory();
+  let list = category.children;
+  let existing = 0;
+  for (const name of path) {
+    const found = list.find((node) => node.name === name);
+    if (!found) break;
+    existing += 1;
+    list = found.children;
+  }
+  if (existing === path.length) return tree;
+  // Build the missing tail as a chain; these nodes exist only because a task
+  // points at them, so they get a tasks block.
+  let chain: TreeNode | null = null;
+  for (let i = path.length - 1; i >= existing; i--) {
+    chain = { ...newNode(path[i], ['tasks']), children: chain ? [chain] : [] };
+  }
+  if (!chain) return tree;
+  const children = existing ? insertNode(category.children, path.slice(0, existing), chain) : [...category.children, chain];
+  return { ...tree, [sphere]: { ...category, children } };
+}
+
 function restoreTopicsFromTasks(): void {
-  let next: Record<string, string[]> | null = null;
+  let next: Tree | null = null;
   for (const task of tasks) {
     const sphere = task.sphere;
     const topic = task.topic;
     if (!sphere || !topic || topic === DEFAULT_TOPIC) continue;
     if (!spheres.includes(sphere)) continue;
-    const list = (next ?? topics)[sphere] ?? [];
-    if (list.includes(topic)) continue;
-    if (!next) next = { ...topics };
-    next[sphere] = [...list, topic];
+    const path = keyPath(topic);
+    if (!path.length || path.length > MAX_LEVEL - 1) continue;
+    const before: Tree = next ?? topics;
+    const after = ensureTaskPath(before, sphere, path);
+    if (after !== before) next = after;
   }
   if (next) topics = next;
 }
 
+/** Categories that exist without a tree entry (data from before folders/blocks,
+ *  or a row inserted straight into the database) would open with NO blocks and
+ *  look empty although they hold tasks. Give them a tasks block once. A category
+ *  the user creates herself always gets an explicit entry (`blocks: []`). */
+function ensureCategoryTrees(): void {
+  let changed = false;
+  const next = { ...topics };
+  for (const sphere of spheres) {
+    if (!next[sphere]) {
+      next[sphere] = { blocks: ['tasks'], children: [] };
+      changed = true;
+    }
+  }
+  if (changed) {
+    topics = next;
+    try {
+      localStorage.setItem(TOPICS_KEY, JSON.stringify(topics));
+    } catch {
+      // quota — the map is rebuilt from tasks on the next load anyway
+    }
+  }
+}
+
 restoreTopicsFromTasks();
+ensureCategoryTrees();
 
 const snapshot = { tasks, spheres, topics, journal, lastView };
 const listeners = new Set<() => void>();
@@ -1775,17 +1844,13 @@ async function fetchView(userId: string) {
     const topicsPart = splitSettings(remoteSetting).topics;
     if (topicsPart) {
       try {
-        const parsed = JSON.parse(topicsPart) as Record<string, unknown>;
-        const remote: Record<string, string[]> = {};
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          for (const [sphere, list] of Object.entries(parsed)) {
-            if (Array.isArray(list)) {
-              remote[sphere] = list.filter((name): name is string => typeof name === 'string');
-            }
-          }
-        }
+        // Accepts both the current tree and the old flat name list, so a phone
+        // still on the previous build cannot wipe the folders.
+        const remote = normalizeTree(JSON.parse(topicsPart));
         const localJson = JSON.stringify(topics);
-        const remoteHasTopics = Object.values(remote).some((list) => list.length > 0);
+        const remoteHasTopics = Object.values(remote).some(
+          (category) => category.blocks.length > 0 || category.children.length > 0,
+        );
         // Adopt the server map when this device cannot lose anything by it: it
         // is empty here, it matches what was last synced, or this is the first
         // sync of the session and the server actually holds topic lists (the
@@ -1804,9 +1869,9 @@ async function fetchView(userId: string) {
           // only the categories this device knows nothing about, and push the
           // merged map back.
           let adopted = false;
-          for (const [sphere, list] of Object.entries(remote)) {
+          for (const [sphere, category] of Object.entries(remote)) {
             if (!(sphere in topics)) {
-              topics = { ...topics, [sphere]: list };
+              topics = { ...topics, [sphere]: category };
               adopted = true;
             }
           }
@@ -2092,8 +2157,9 @@ export const store = {
       // category does not have: it would match no tab and vanish from the
       // dashboard. Explicit `topic` in the patch always wins.
       if (patch.sphere !== undefined && patch.sphere !== t.sphere && patch.topic === undefined) {
-        const allowed = patch.sphere ? (topics[patch.sphere] ?? []) : [];
-        if (next.topic && !allowed.includes(next.topic)) next.topic = undefined;
+        if (next.topic && !pathExists(topics, patch.sphere ?? '', keyPath(next.topic))) {
+          next.topic = undefined;
+        }
       }
       return next;
     });
@@ -2239,28 +2305,33 @@ export const store = {
     // (user_id, name) index rejects the whole upsert payload (21000), so the
     // rename would never reach the database at all.
     const collide = spheres.includes(name);
-    const targetTopics = topics[name] ?? [];
     spheres = collide
       ? spheres.filter((s) => s !== oldName)
       : spheres.map((s) => (s === oldName ? name : s));
-    // A task moved into a topic the target category does not have would be
-    // invisible (the dashboard only lists topics the category owns), so it
-    // falls back to "Основное".
-    const movedTopic = (topic: string | undefined) =>
-      collide && topic && !targetTopics.includes(topic) ? undefined : topic;
-    tasks = tasks.map((t) =>
-      t.sphere === oldName ? { ...t, sphere: name, topic: movedTopic(t.topic) } : t,
-    );
-    const oldTopics = topics[oldName];
-    if (oldTopics || collide) {
-      const nextTopics = { ...topics };
-      delete nextTopics[oldName];
-      if (oldTopics) {
-        const merged = [...(nextTopics[name] ?? [])];
-        for (const t of oldTopics) if (!merged.includes(t)) merged.push(t);
-        nextTopics[name] = merged;
+    // A task moved into a folder the target category does not have would be
+    // invisible (the dashboard only shows the folders a category owns), so it
+    // falls back to the category itself.
+    tasks = tasks.map((t) => {
+      if (t.sphere !== oldName) return t;
+      let topic = t.topic;
+      if (collide && topic && !pathExists(topics, name, keyPath(topic))) topic = undefined;
+      return { ...t, sphere: name, topic };
+    });
+    const oldTree = topics[oldName];
+    if (oldTree || collide) {
+      const next = { ...topics };
+      delete next[oldName];
+      if (oldTree) {
+        const base = next[name] ?? emptyCategory();
+        const children = [...base.children];
+        for (const node of oldTree.children) {
+          if (!children.some((c) => c.name === node.name)) children.push(node);
+        }
+        const blocks = [...base.blocks];
+        for (const block of oldTree.blocks) if (!blocks.includes(block)) blocks.push(block);
+        next[name] = { blocks, children };
       }
-      topics = nextTopics;
+      topics = next;
     }
     // A rename is a CREATE of the new name plus a DELETE of the old one. The
     // upsert below only ever adds rows, so without this tombstone the old row
@@ -2277,8 +2348,9 @@ export const store = {
     // the tombstone would remove the fresh row on the next fetch.
     clearSphereTombstone(n);
     spheres = [...spheres, n];
-    // Initialize with empty topics (Основное is implicit)
-    topics = { ...topics, [n]: [] };
+    // A brand new category starts with NO blocks: the user adds задачи /
+    // заметки / мудборд herself.
+    topics = { ...topics, [n]: emptyCategory() };
     emit();
   },
   removeSphere(name: string) {
@@ -2298,47 +2370,81 @@ export const store = {
     spheres = filtered.length ? filtered : [...spheres];
     emit();
   },
-  reorderTopics(sphere: string, ordered: string[]) {
-    const existing = topics[sphere] ?? [];
-    const filtered = ordered.filter((t) => existing.includes(t));
-    if (filtered.length !== existing.length) return;
-    topics = { ...topics, [sphere]: filtered };
+  /** Reorder folders inside one level; `parentPath = []` is the category. */
+  reorderTopics(sphere: string, orderedIds: string[], parentPath: string[] = []) {
+    if (!spheres.includes(sphere)) return;
+    const category = topics[sphere] ?? emptyCategory();
+    const children = reorderLevel(category.children, parentPath, orderedIds);
+    if (children === category.children) return;
+    topics = { ...topics, [sphere]: { ...category, children } };
     emit();
   },
-  addTopic(sphere: string, name: string) {
+  /** Add a folder. `parentPath = []` puts it directly in the category; a new
+   *  folder has no blocks until the user adds them. */
+  addTopic(sphere: string, name: string, parentPath: string[] = []) {
     const n = name.trim();
     if (!n || !spheres.includes(sphere)) return;
-    const list = topics[sphere] ?? [];
-    if (list.includes(n)) return;
-    topics = { ...topics, [sphere]: [...list, n] };
+    if (parentPath.length > MAX_LEVEL - 2) return; // deeper than 3 levels
+    const category = topics[sphere] ?? emptyCategory();
+    const siblings = parentPath.length
+      ? (nodeAt(category.children, parentPath)?.children ?? [])
+      : category.children;
+    if (siblings.some((node) => node.name === n)) return;
+    const children = insertNode(category.children, parentPath, newNode(n));
+    topics = { ...topics, [sphere]: { ...category, children } };
     emit();
   },
-  removeTopic(sphere: string, name: string) {
-    if (name === DEFAULT_TOPIC || !spheres.includes(sphere)) return;
-    const list = topics[sphere] ?? [];
-    const next = list.filter((t) => t !== name);
-    if (next.length === list.length) return; // Not found
-    topics = { ...topics, [sphere]: next };
-    // Move tasks from this topic to Основное
+  /** Delete a folder, everything inside it, and file its tasks under the
+   *  category itself (nested tasks lose their path). */
+  removeTopic(sphere: string, target: string | string[]) {
+    if (!spheres.includes(sphere)) return;
+    const path = typeof target === 'string' ? [target] : target;
+    if (!path.length || path[0] === DEFAULT_TOPIC) return;
+    const category = topics[sphere] ?? emptyCategory();
+    if (!nodeAt(category.children, path)) return;
+    topics = { ...topics, [sphere]: { ...category, children: removeNodeAt(category.children, path) } };
+    // Tasks of the deleted folder (and of the folders inside it) move one
+    // level up, not all the way back to the category.
+    const parentTopic = path.length > 1 ? pathKey(path.slice(0, -1)) : undefined;
     tasks = tasks.map((t) =>
-      t.sphere === sphere && t.topic === name
-        ? { ...t, topic: undefined }
-        : t
+      t.sphere === sphere && inSubtree(t.topic, path) ? { ...t, topic: parentTopic } : t,
     );
     emit();
   },
-  renameTopic(sphere: string, oldName: string, newName: string) {
+  renameTopic(sphere: string, target: string | string[], newName: string) {
     const name = newName.trim();
-    if (!name || name === oldName || !spheres.includes(sphere)) return;
-    const list = topics[sphere] ?? [];
-    if (!list.includes(oldName) || list.includes(name)) return;
-    topics = {
-      ...topics,
-      [sphere]: list.map((t) => (t === oldName ? name : t)),
-    };
+    if (!name || !spheres.includes(sphere)) return;
+    const path = typeof target === 'string' ? [target] : target;
+    if (!path.length || name === path[path.length - 1]) return;
+    const category = topics[sphere] ?? emptyCategory();
+    if (!nodeAt(category.children, path)) return;
+    const parentPath = path.slice(0, -1);
+    const siblings = parentPath.length
+      ? (nodeAt(category.children, parentPath)?.children ?? [])
+      : category.children;
+    if (siblings.some((node) => node.name === name)) return;
+    const nextPath = [...parentPath, name];
+    const children = mapNode(category.children, path, (node) => ({ ...node, name }));
+    topics = { ...topics, [sphere]: { ...category, children } };
+    // The tasks point at a path of names, so the whole subtree follows.
     tasks = tasks.map((t) =>
-      t.sphere === sphere && t.topic === oldName ? { ...t, topic: name } : t
+      t.sphere === sphere ? { ...t, topic: renamePrefix(t.topic, path, nextPath) } : t,
     );
+    emit();
+  },
+  /** Which blocks a node shows; `path = []` is the category itself. */
+  setBlocks(sphere: string, path: string[], blocks: BlockKind[]) {
+    if (!spheres.includes(sphere)) return;
+    const unique = blocks.filter((block, at) => blocks.indexOf(block) === at);
+    const category = topics[sphere] ?? emptyCategory();
+    if (!path.length) {
+      topics = { ...topics, [sphere]: { ...category, blocks: unique } };
+      emit();
+      return;
+    }
+    if (!nodeAt(category.children, path)) return;
+    const children = mapNode(category.children, path, (node) => ({ ...node, blocks: unique }));
+    topics = { ...topics, [sphere]: { ...category, children } };
     emit();
   },
   clearAll() {
@@ -2355,8 +2461,16 @@ export const store = {
   getTasks(): Task[] {
     return tasks;
   },
-  /** The topic (sub-category) map, per category. Used by tests. */
+  /** Top-level folder names per category. Used by the sync test. */
   getTopics(): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    for (const [sphere, category] of Object.entries(topics)) {
+      out[sphere] = category.children.map((node) => node.name);
+    }
+    return out;
+  },
+  /** The whole folder tree with its blocks. */
+  getTree(): Tree {
     return topics;
   },
   getById(id: string): Task | undefined {
@@ -2418,10 +2532,11 @@ export type BackupFile = {
   exportedAt: string;
   tasks: Task[];
   spheres: string[];
-  /** Dashboard sub-categories per category. Optional: files written before this
-   *  field existed simply have no tabs, and the tabs are then rebuilt from the
-   *  tasks' own `topic` values on load. */
-  topics?: Record<string, string[]>;
+  /** Dashboard folder tree (categories → folders → folders, with blocks).
+   *  Optional: files written before this field existed simply have no folders,
+   *  and the tree is then rebuilt from the tasks' own `topic` values. Old flat
+   *  `{ sphere: [name] }` files are still accepted (`normalizeTree`). */
+  topics?: unknown;
 };
 
 // Explicit "send this device to the server". The automatic paths only push what
@@ -2569,19 +2684,10 @@ export function restoreFromBackupJson(text: string): RestoreResult {
   // The delete intent wins: restoring a file must not resurrect them.
   const nextSpheres = [...spheres, ...backupSpheres.filter((s) => !spheres.includes(s) && !deletedSpheres.has(s))];
 
-  // Sub-categories from the file, merged per category — a backup from one
-  // device must not wipe tabs the other device has.
-  if (parsed?.topics && typeof parsed.topics === 'object' && !Array.isArray(parsed.topics)) {
-    const nextTopics: Record<string, string[]> = { ...topics };
-    for (const [sphere, list] of Object.entries(parsed.topics as Record<string, unknown>)) {
-      if (!Array.isArray(list)) continue;
-      const merged = [...(nextTopics[sphere] ?? [])];
-      for (const name of list) {
-        if (typeof name === 'string' && name && !merged.includes(name)) merged.push(name);
-      }
-      nextTopics[sphere] = merged;
-    }
-    topics = nextTopics;
+  // Folders and blocks from the file, merged per category and per folder — a
+  // backup from one device must not wipe what the other device has.
+  if (parsed?.topics && typeof parsed.topics === 'object') {
+    topics = mergeTree(topics, normalizeTree(parsed.topics));
   }
 
   tasks = [...byId.values()];
@@ -2614,7 +2720,7 @@ export function useTasks(): Task[] {
 export function useSpheres(): string[] {
   return useSyncExternalStore(store.subscribe, () => snapshot.spheres, () => snapshot.spheres);
 }
-export function useTopics(): Record<string, string[]> {
+export function useTopics(): Tree {
   return useSyncExternalStore(store.subscribe, () => snapshot.topics, () => snapshot.topics);
 }
 export function useJournal(): Record<string, string> {

@@ -1,0 +1,97 @@
+# Один стек на три приложения: календарь, меню и «Тело» — на ОДНОМ внешнем порту 48291.
+#
+# Файл кладётся в домашний каталог сервера (/home/vlada/docker-compose.yml),
+# рядом лежат распакованные папки проектов: calendar-src/, recipes-src/, body-src/.
+#
+# Как устроено:
+#   - наружу публикуется только recipes (порт 48291 -> 443 внутри контейнера);
+#   - его nginx отдаёт меню, проксирует /luna-calendar-secure/ на calendar:443
+#     и /luna-body-secure/ на body:443;
+#   - у calendar и body записей ports нет вообще, поэтому второго хост-порта не
+#     нужно (внутри docker-сети контейнеры доступны по имени, порт 443).
+#
+# Запуск (из домашнего каталога):
+#   cd ~ && docker compose up -d --build --force-recreate
+#
+# Проверка:
+#   docker compose ps
+#   docker ps --format '{{.Names}}\t{{.Ports}}'   # 48291 должен быть ровно один
+#   curl -k -o /dev/null -w '%{http_code}\n' https://127.0.0.1:48291/
+#   curl -k -o /dev/null -w '%{http_code}\n' https://127.0.0.1:48291/luna-menu-secure/
+#   curl -k -o /dev/null -w '%{http_code}\n' https://127.0.0.1:48291/luna-calendar-secure/
+#   curl -k -o /dev/null -w '%{http_code}\n' https://127.0.0.1:48291/luna-body-secure/
+
+name: luna
+
+services:
+  calendar:
+    image: calendar-app:latest
+    container_name: calendar-container
+    build:
+      context: ./calendar-src
+      dockerfile: Dockerfile
+    # Портов наружу НЕТ: календарь доступен только через nginx меню
+    # по пути /luna-calendar-secure/. expose нужен лишь для наглядности —
+    # в docker-сети контейнер и так слушает 443.
+    expose:
+      - "443"
+    volumes:
+      # Сертификаты Let's Encrypt (только чтение)
+      - /etc/letsencrypt:/etc/nginx/certs:ro
+      # Конфиг nginx с HTTPS и прокси на Supabase
+      - ./calendar-src/nginx-https.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "/dev/null", "https://127.0.0.1/luna-calendar-secure/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  body:
+    image: body-app:latest
+    container_name: body-container
+    build:
+      context: ./body-src
+      dockerfile: Dockerfile
+    # Портов наружу НЕТ: «Тело» доступно только через nginx меню
+    # по пути /luna-body-secure/.
+    expose:
+      - "443"
+    volumes:
+      - /etc/letsencrypt:/etc/nginx/certs:ro
+      - ./body-src/nginx-https.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "/dev/null", "https://127.0.0.1/luna-body-secure/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  recipes:
+    image: recipes-app:latest
+    container_name: recipes-container
+    build:
+      context: ./recipes-src
+      dockerfile: Dockerfile
+    ports:
+      # Единственный внешний порт стека: меню, календарь и «Тело».
+      # Сертификат тот же, что у календаря: он выписан на домен, а не на порт.
+      - "48291:443"
+    volumes:
+      - /etc/letsencrypt:/etc/nginx/certs:ro
+      # nginx-шлюз: меню из своей статики + прокси календаря и «Тела»
+      - ./recipes-src/nginx-https.conf:/etc/nginx/conf.d/default.conf:ro
+      # Страница-визитка на "/" со ссылками на все приложения
+      - ./recipes-src/gateway-index.html:/usr/share/nginx/html/index.html:ro
+    depends_on:
+      - calendar
+      - body
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "/dev/null", "https://127.0.0.1/luna-menu-secure/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

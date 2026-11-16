@@ -31,6 +31,8 @@ export interface BoardPhoto {
   /** `data:image/...` — already downscaled, see `lib/image.ts`. */
   data: string;
   caption: string;
+  /** Which dashboard node (category/folder) this picture belongs to. */
+  nodeKey: string;
   /** Creation time. The grid is ordered by this, NOT by `t`: editing a
    *  caption must not make the photo jump to the end of the moodboard. */
   born: number;
@@ -43,6 +45,8 @@ export interface BoardNote {
   kind: 'note';
   text: string;
   color: string;
+  /** Which dashboard node (category/folder) this note belongs to. */
+  nodeKey: string;
   /** Creation time — the list order is stable across edits. */
   born: number;
   t: number;
@@ -71,6 +75,7 @@ function sanitize(id: string, value: unknown): BoardItem | null {
       kind: 'photo',
       data: deleted ? '' : data,
       caption: typeof src.caption === 'string' ? src.caption : '',
+      nodeKey: typeof src.nodeKey === 'string' ? src.nodeKey : '',
       born: Number(src.born) || t,
       t,
       deleted,
@@ -84,6 +89,7 @@ function sanitize(id: string, value: unknown): BoardItem | null {
       kind: 'note',
       text,
       color: typeof src.color === 'string' ? src.color : NOTE_COLORS[0],
+      nodeKey: typeof src.nodeKey === 'string' ? src.nodeKey : '',
       born: Number(src.born) || t,
       t,
       deleted,
@@ -161,10 +167,10 @@ export function getBoardPhotos(): BoardPhoto[] {
 
 export type AddResult = { ok: true } | { ok: false; message: string };
 
-export function addBoardPhoto(data: string, caption = ''): AddResult {
+export function addBoardPhoto(data: string, caption = '', nodeKey = ''): AddResult {
   const id = uuid();
   const now = Date.now();
-  items[id] = { id, kind: 'photo', data, caption, born: now, t: now };
+  items[id] = { id, kind: 'photo', data, caption, nodeKey, born: now, t: now };
   if (!storeFits()) {
     delete items[id];
     rebuild();
@@ -182,12 +188,12 @@ export function updateBoardPhoto(id: string, patch: { caption?: string }): void 
   persist();
 }
 
-export function addBoardNote(text: string, color = NOTE_COLORS[0]): BoardNote | null {
+export function addBoardNote(text: string, color = NOTE_COLORS[0], nodeKey = ''): BoardNote | null {
   const value = text.trim();
   if (!value) return null;
   const id = uuid();
   const now = Date.now();
-  const note: BoardNote = { id, kind: 'note', text: value, color, born: now, t: now };
+  const note: BoardNote = { id, kind: 'note', text: value, color, nodeKey, born: now, t: now };
   items[id] = note;
   persist();
   return note;
@@ -224,6 +230,38 @@ export function removeBoardItem(id: string): void {
   persist();
 }
 
+/** One-time migration: entries created before the dashboard had nodes carry no
+ *  `nodeKey`. Attach them to a node instead of letting them vanish. */
+export function claimOrphans(nodeKey: string): void {
+  if (!nodeKey) return;
+  let changed = false;
+  for (const item of Object.values(items)) {
+    if (item.deleted || item.nodeKey) continue;
+    items[item.id] = { ...item, nodeKey, t: Date.now() };
+    changed = true;
+  }
+  if (changed) persist();
+}
+
+/** Move the content of a deleted folder up into its parent (or the category),
+ *  so notes and pictures do not become invisible when the folder goes away. */
+export function rekeyNode(fromKey: string, toKey: string): void {
+  if (!fromKey || fromKey === toKey) return;
+  const prefix = `${fromKey}\u001F`;
+  let changed = false;
+  for (const item of Object.values(items)) {
+    if (item.deleted || !item.nodeKey) continue;
+    if (item.nodeKey === fromKey) {
+      items[item.id] = { ...item, nodeKey: toKey, t: Date.now() };
+      changed = true;
+    } else if (item.nodeKey.startsWith(prefix)) {
+      items[item.id] = { ...item, nodeKey: `${toKey}${item.nodeKey.slice(fromKey.length)}`, t: Date.now() };
+      changed = true;
+    }
+  }
+  if (changed) persist();
+}
+
 // ── Supabase mirror ──────────────────────────────────────────────────────
 // One row per entry (`board_items`), so adding a photo uploads only that
 // photo — the whole moodboard is never rewritten in one request.
@@ -238,8 +276,8 @@ interface Row {
 
 function toRow(item: BoardItem, userId: string): Row & { user_id: string } {
   const payload: Record<string, unknown> = item.kind === 'photo'
-    ? { data: item.data, caption: item.caption, born: item.born }
-    : { text: item.text, color: item.color, born: item.born };
+    ? { data: item.data, caption: item.caption, born: item.born, nodeKey: item.nodeKey }
+    : { text: item.text, color: item.color, born: item.born, nodeKey: item.nodeKey };
   return { id: item.id, user_id: userId, kind: item.kind, payload, t: item.t, deleted: item.deleted === true };
 }
 
@@ -256,6 +294,7 @@ function fromRow(row: Record<string, unknown>): BoardItem | null {
       kind: 'photo',
       data: typeof payload.data === 'string' ? payload.data : '',
       caption: typeof payload.caption === 'string' ? payload.caption : '',
+      nodeKey: typeof payload.nodeKey === 'string' ? payload.nodeKey : '',
       born: Number(payload.born) || undefined,
     });
   }
@@ -265,6 +304,7 @@ function fromRow(row: Record<string, unknown>): BoardItem | null {
       kind: 'note',
       text: typeof payload.text === 'string' ? payload.text : '',
       color: typeof payload.color === 'string' ? payload.color : NOTE_COLORS[0],
+      nodeKey: typeof payload.nodeKey === 'string' ? payload.nodeKey : '',
       born: Number(payload.born) || undefined,
     });
   }
