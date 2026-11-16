@@ -3,7 +3,7 @@ import type { Task } from '../types';
 import { store } from '../store';
 import { useTasks } from '../store';
 import { RecurringDeleteModal } from './RecurringDeleteModal';
-import { isDoneOn } from '../utils/date';
+import { isDoneOn, isSameDayHidden } from '../utils/date';
 
 function SubtaskCounter({ parentId }: { parentId: string }) {
   const tasks = useTasks();
@@ -115,6 +115,26 @@ export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props)
   const touchTargetTask = useRef<{ id: string; place: 'above' | 'below' } | null>(null);
 
   const done = date ? isDoneOn(task, date) : task.completed;
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(task.title);
+  const inlineInputRef = useRef<HTMLInputElement>(null);
+
+  const startInlineEdit = () => {
+    setTitleDraft(task.title);
+    setIsEditingTitle(true);
+    setTimeout(() => {
+      inlineInputRef.current?.focus();
+      inlineInputRef.current?.select();
+    }, 0);
+  };
+
+  const saveInlineEdit = () => {
+    const trimmed = titleDraft.trim();
+    if (trimmed && trimmed !== task.title) {
+      store.update(task.id, { title: trimmed });
+    }
+    setIsEditingTitle(false);
+  };
 
   const cancelLongPress = () => {
     if (longPressTimer.current !== null) {
@@ -195,6 +215,7 @@ export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props)
     hl && 'hl',
     done && 'completed',
     task.unplanned && !done && 'unplanned',
+    isSameDayHidden(task, date) && 'same-day-hidden',
     over && `drop-${over}`,
     touchDragging && 'touch-dragging',
   ]
@@ -236,12 +257,12 @@ export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props)
       style={hl ? ({ ['--hl' as any]: bg } as any) : undefined}
       onClick={(e) => {
         e.stopPropagation();
-        // A long-press already opened the editor — don't also toggle done.
+        // Clicking on the task row triggers inline title editing
         if (didLongPress.current) {
           didLongPress.current = false;
           return;
         }
-        toggle();
+        startInlineEdit();
       }}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -296,12 +317,50 @@ export function TaskItem({ task, date, onEdit, selectedDate, onReorder }: Props)
         onReorder(draggedId, task.id, place);
       }}
     >
+      <button
+        type="button"
+        className={`task-check-circle ${done ? 'checked' : ''}`}
+        title={done ? 'Отметить как невыполненную' : 'Отметить как выполненную'}
+        aria-label={done ? 'Отметить как невыполненную' : 'Отметить как выполненную'}
+        onClick={(e) => {
+          e.stopPropagation();
+          toggle();
+        }}
+      >
+        {done && (
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <polyline points="2.5 6.5 5 9 9.5 3.5" />
+          </svg>
+        )}
+      </button>
       {task.recurrence !== 'none' && (
         <span className="recur-icon" title="повторяется">
           ↻
         </span>
       )}
-      <span className="title">{task.title}</span>
+      {isEditingTitle ? (
+        <input
+          ref={inlineInputRef}
+          type="text"
+          className="task-inline-input"
+          value={titleDraft}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => setTitleDraft(e.target.value)}
+          onBlur={saveInlineEdit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              saveInlineEdit();
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              setTitleDraft(task.title);
+              setIsEditingTitle(false);
+            }
+          }}
+        />
+      ) : (
+        <span className="title">{task.title}</span>
+      )}
       {task.priority === 'high' && <span className="meta">!</span>}
       {!task.subtaskOf && task.subtaskIds && task.subtaskIds.length > 0 && (
         <SubtaskCounter parentId={task.id} />

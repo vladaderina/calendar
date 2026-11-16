@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { addDays, addMonths, addWeeks, addYears, format } from 'date-fns';
+import { addDays, addMonths, addWeeks, addYears, format, isSameDay, isSameWeek, isSameMonth } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import type { View, Task } from './types';
 import { fmt } from './utils/date';
@@ -7,16 +7,19 @@ import { WeekView } from './components/WeekView';
 import { MonthView } from './components/MonthView';
 import { DayView } from './components/DayView';
 import { YearView } from './components/YearView';
+import { YearWheelView } from './components/YearWheelView';
 import { DashboardView } from './components/DashboardView';
 import { PlannedListView } from './components/PlannedListView';
 import { AnalyticsView } from './components/AnalyticsView';
-import { store, useLastView, pullRemoteTasks } from './store';
+import { store, useLastView, useSyncStatus, syncNow } from './store';
 import { initSupabase } from './store';
 import { TaskModal } from './components/TaskModal';
 import { SearchModal } from './components/SearchModal';
+import BackupModal from './components/BackupModal';
 import { ChevronIcon } from './icons/ChevronIcon';
 import { AuthGate } from './components/AuthGate';
-import { signOut } from './lib/auth';
+import { signOut, getCurrentUser } from './lib/auth';
+import { useUpdateAvailable } from './lib/updateCheck';
 
 // Inline SVG icons for the top nav.
 const DashboardIcon = () => (
@@ -39,15 +42,16 @@ const YearViewIcon = () => (
     <path d="M4 9h3v3H4zM9 9h3v3H9zM14 9h3v3H9zM4 14h3v3H4zM9 14h3v3H4zM14 14h3v3h-3z" />
   </svg>
 );
+const WheelIcon = () => (
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 3v9M12 12l7.8 4.5M12 12l-7.8 4.5" />
+  </svg>
+);
 const SearchIcon = () => (
   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
     <circle cx="11" cy="11" r="7" />
     <path d="M21 21l-4.3-4.3" />
-  </svg>
-);
-const AnalyticsIcon = () => (
-  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d="M3 3v18h18M9 12l2-2 4 4-2 2-4-4z" />
   </svg>
 );
 const WeekViewIcon = () => (
@@ -64,6 +68,21 @@ const RefreshIcon = () => (
   </svg>
 );
 
+const CheckSquareIcon = ({ active }: { active: boolean }) => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <rect x="3" y="3" width="18" height="18" rx="4" />
+    {active && <path d="M7.5 12l3 3 6-6" stroke="currentColor" strokeWidth="2.4" />}
+  </svg>
+);
+
+const DataIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <ellipse cx="12" cy="5" rx="8" ry="3" />
+    <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" />
+    <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" />
+  </svg>
+);
+
 const LogoutIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
@@ -75,13 +94,36 @@ const LogoutIcon = () => (
 function AppContent() {
   // View comes from the store (persisted in localStorage + Supabase)
   const view = useLastView() as View;
+  const updateAvailable = useUpdateAvailable();
+  const accountEmail = getCurrentUser()?.email ?? '';
   const setViewPersisted = (next: View) => {
     store.saveView(next);
   };
   const [anchor, setAnchor] = useState(new Date());
   const [modal, setModal] = useState<{ initial?: Partial<Task>; editingId?: string; selectedDate?: string } | null>(null);
   const [showSearchModal, setShowSearchModal] = useState(false);
+  const [showBackupModal, setShowBackupModal] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showCompleted, setShowCompleted] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('calendar.show_completed.v1');
+      return saved ? JSON.parse(saved) : false;
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleShowCompleted = () => {
+    setShowCompleted((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('calendar.show_completed.v1', JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
 
   // Initialize Supabase when component mounts
   useEffect(() => {
@@ -97,10 +139,11 @@ function AppContent() {
     }
   };
 
+  const syncStatus = useSyncStatus();
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
-      await pullRemoteTasks();
+      await syncNow();
     } finally {
       setIsRefreshing(false);
     }
@@ -113,6 +156,7 @@ function AppContent() {
       case 'week': return 'НЕДЕЛЯ';
       case 'month': return 'МЕСЯЦ';
       case 'year': return 'ГОД';
+      case 'wheel': return 'КРУГ ГОДА';
       case 'planned': return 'ЗАПЛАНИРОВАННЫЕ';
       case 'analytics': return 'АНАЛИТИКА';
     }
@@ -133,6 +177,38 @@ function AppContent() {
   const isCalendarSection =
     view === 'week' || view === 'day' || view === 'month' || view === 'year';
 
+  const isTodayActive = (() => {
+    const today = new Date();
+    switch (view) {
+      case 'day': return isSameDay(anchor, today);
+      case 'week': return isSameWeek(anchor, today, { weekStartsOn: 1 });
+      case 'month': return isSameMonth(anchor, today);
+      case 'year': return anchor.getFullYear() === today.getFullYear();
+      default: return true;
+    }
+  })();
+
+  const handleTodayClick = () => {
+    setAnchor(new Date());
+    if (view === 'day') {
+      // already in day view, anchor snaps to today
+    } else if (view === 'month' || view === 'year') {
+      // in month/year view, snap to current month/year
+    } else {
+      // in week view or others
+      const contentEl = document.querySelector('.content') as HTMLElement | null;
+      const todayCell = document.querySelector('.cell-header.today') as HTMLElement | null;
+      if (contentEl && todayCell) {
+        const cellEl = todayCell.closest('.cell') as HTMLElement;
+        const targetEl = cellEl || todayCell;
+        const contentRect = contentEl.getBoundingClientRect();
+        const targetRect = targetEl.getBoundingClientRect();
+        const targetScrollTop = contentEl.scrollTop + (targetRect.top - contentRect.top) - 60;
+        contentEl.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' });
+      }
+    }
+  };
+
   const goToWeek = () => {
     setViewPersisted('week')
     setAnchor(new Date());
@@ -144,7 +220,7 @@ function AppContent() {
   };
 
   return (
-    <div className="app">
+    <div className={`app ${showCompleted ? 'show-completed' : 'hide-completed'}`}>
       <div className="paper">
         <div className="header">
           <div className="header-title">
@@ -161,6 +237,12 @@ function AppContent() {
             {subtitle && (
               <div className="view-subtitle" title={subtitle}>{subtitle}</div>
             )}
+            <button
+              className={`mobile-today-title-btn ${isTodayActive ? 'active' : 'idle'}`}
+              onClick={handleTodayClick}
+            >
+              сегодня
+            </button>
           </div>
 
           <div className="view-switcher-fixed" role="group" aria-label="Переключить вид">
@@ -197,25 +279,33 @@ function AppContent() {
               <YearViewIcon />
             </button>
             <button
-              className={`view-switcher-btn ${view === 'analytics' ? 'active' : ''}`}
-              onClick={() => setViewPersisted('analytics')}
-              title="Аналитика"
-              aria-label="Аналитика"
+              className={`view-switcher-btn ${view === 'wheel' ? 'active' : ''}`}
+              onClick={() => setViewPersisted('wheel')}
+              title="Круг года"
+              aria-label="Круг года"
             >
-              <AnalyticsIcon />
+              <WheelIcon />
             </button>
           </div>
 
           <div className="header-controls">
+            <button
+              className={`nav-btn-arrow nav-btn-toggle-completed ${showCompleted ? 'active' : ''}`}
+              onClick={toggleShowCompleted}
+              title={showCompleted ? 'Скрыть выполненные задачи' : 'Показать выполненные задачи'}
+              aria-label={showCompleted ? 'Скрыть выполненные задачи' : 'Показать выполненные задачи'}
+            >
+              <CheckSquareIcon active={showCompleted} />
+            </button>
             {view === 'dashboard' && (
               <>
-                <button className="today-btn" onClick={() => setAnchor(new Date())}>сегодня</button>
+                <button className="today-btn desktop-only" onClick={handleTodayClick}>сегодня</button>
                 <button className="nav-btn-search" onClick={() => setShowSearchModal(true)} title="Поиск" aria-label="Поиск"><SearchIcon /></button>
               </>
             )}
             {view === 'planned' && (
               <>
-                <button className="today-btn" onClick={() => setAnchor(new Date())}>сегодня</button>
+                <button className="today-btn desktop-only" onClick={handleTodayClick}>сегодня</button>
                 <button className="nav-btn-search" onClick={() => setShowSearchModal(true)} title="Поиск" aria-label="Поиск"><SearchIcon /></button>
               </>
             )}
@@ -224,18 +314,63 @@ function AppContent() {
                 <button className="nav-btn-search" onClick={() => setShowSearchModal(true)} title="Поиск" aria-label="Поиск"><SearchIcon /></button>
               </>
             )}
-            {view !== 'dashboard' && view !== 'planned' && view !== 'analytics' && (
+            {view !== 'dashboard' && view !== 'planned' && view !== 'analytics' && view !== 'wheel' && (
               <>
-                <button className="today-btn" onClick={() => setAnchor(new Date())}>сегодня</button>
+                <button className="today-btn desktop-only" onClick={handleTodayClick}>сегодня</button>
                 <button className="nav-btn-search" onClick={() => setShowSearchModal(true)} title="Поиск" aria-label="Поиск"><SearchIcon /></button>
                 <button className={`nav-btn-arrow nav-btn-refresh ${isRefreshing ? 'refreshing' : ''}`} onClick={handleRefresh} disabled={isRefreshing} title="Обновить" aria-label="Обновить"><RefreshIcon /></button>
                 <button className="nav-btn-arrow" onClick={() => shift(-1)} aria-label="Назад"><ChevronIcon dir="left" /></button>
                 <button className="nav-btn-arrow" onClick={() => shift(1)} aria-label="Вперёд"><ChevronIcon dir="right" /></button>
               </>
             )}
+            {accountEmail && <span className="account-chip" title={`Вы вошли как ${accountEmail}`}>{accountEmail}</span>}
+            <button className="nav-btn-arrow" onClick={() => setShowBackupModal(true)} title="Данные: копия и восстановление" aria-label="Данные"><DataIcon /></button>
             <button className="nav-btn-arrow" onClick={() => void signOut()} title="Выйти" aria-label="Выйти"><LogoutIcon /></button>
           </div>
         </div>
+
+        {updateAvailable && (
+          <div className="sync-banner update" role="status" aria-live="polite">
+            <span className="sync-banner-text">
+              доступна новая версия приложения — старые версии не синхронизируются
+            </span>
+            <button type="button" className="sync-banner-retry" onClick={() => window.location.reload()}>
+              Обновить
+            </button>
+          </div>
+        )}
+
+        {(syncStatus.state === 'error' ||
+          syncStatus.state === 'offline' ||
+          syncStatus.state === 'syncing') && (
+          <div className={`sync-banner ${syncStatus.state}`} role="status" aria-live="polite">
+            <span className="sync-banner-text">
+              {syncStatus.message ||
+                (syncStatus.state === 'offline'
+                  ? 'нет сети — изменения копятся на устройстве'
+                  : syncStatus.state === 'syncing'
+                    ? 'синхронизирую…'
+                    : 'нет связи с сервером')}
+              {syncStatus.lastSuccessAt && (
+                <span className="sync-banner-time">
+                  {' '}· последняя удачная синхронизация{' '}
+                  {new Date(syncStatus.lastSuccessAt).toLocaleTimeString('ru-RU', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </span>
+              )}
+            </span>
+            <button
+              type="button"
+              className="sync-banner-retry"
+              onClick={() => void handleRefresh()}
+              disabled={isRefreshing}
+            >
+              Повторить
+            </button>
+          </div>
+        )}
 
         <div className="content">
           {view === 'dashboard' && <DashboardView onEdit={openEdit} />}
@@ -243,6 +378,7 @@ function AppContent() {
           {view === 'week' && <WeekView anchor={anchor} onEdit={openEdit} onPickDate={(d) => { setAnchor(d); setViewPersisted('day'); }} /> }
           {view === 'month' && <MonthView key={fmt.iso(anchor)} anchor={anchor} onEdit={openEdit} onPickDate={(d) => { setAnchor(d); setViewPersisted('day'); }} />}
           {view === 'year' && <YearView key={fmt.iso(anchor)} anchor={anchor} onPickDate={(d) => { setAnchor(d); setViewPersisted('week'); }} onZoomIn={() => setViewPersisted('month')} />}
+          {view === 'wheel' && <YearWheelView onOpenWeek={(d) => { setAnchor(d); setViewPersisted('week'); }} />}
           {view === 'planned' && <PlannedListView onEdit={openEdit} />}
           {view === 'analytics' && <AnalyticsView />}
         </div>
@@ -266,6 +402,14 @@ function AppContent() {
         >
           <WeekViewIcon />
         </button>
+        <button
+          className={`mobile-nav-btn ${view === 'wheel' ? 'active' : ''}`}
+          onClick={() => setViewPersisted('wheel')}
+          title="Круг года"
+          aria-label="Круг года"
+        >
+          <WheelIcon />
+        </button>
       </nav>
 
       {modal && (
@@ -276,6 +420,8 @@ function AppContent() {
           onClose={() => setModal(null)}
         />
       )}
+
+      {showBackupModal && <BackupModal onClose={() => setShowBackupModal(false)} />}
 
       {showSearchModal && (
         <SearchModal

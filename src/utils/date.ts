@@ -51,6 +51,7 @@ export function taskOnDate(t: Task, date: Date): boolean {
   const iso = format(d, 'yyyy-MM-dd');
   // A recurring occurrence explicitly deleted ("только эта") never shows.
   if (t.excludedDates?.includes(iso)) return false;
+
   const start = startOfDay(parseISO(t.startDate));
   const end = startOfDay(parseISO(t.endDate ?? t.startDate));
   if (d >= start && d <= end) return true;
@@ -76,6 +77,31 @@ export function taskOnDate(t: Task, date: Date): boolean {
     }
   }
   return false;
+}
+
+// Determines if a task with `sameDayOnly` should be hidden when showCompleted is OFF:
+// - Not sameDayOnly: never hidden by this rule.
+// - Must match its scheduled occurrence date (taskOnDate). If it doesn't fall on this day, it shouldn't show.
+// - If date is today: visible only if today is actually one of its scheduled occurrence days!
+// - If date is in the past: visible only if it was scheduled for that date AND completed.
+// - If date is in the future: hidden unless toggle is ON.
+export function isSameDayHidden(t: Task, date?: Date): boolean {
+  if (!t.sameDayOnly || !date) return false;
+  // If the task does not even occur on this date per its schedule/recurrence, hide it!
+  if (!taskOnDate(t, date)) return true;
+
+  const d = startOfDay(date);
+  const today = startOfDay(new Date());
+  if (d.getTime() === today.getTime()) {
+    // On today, it shows only because it actually occurs on today!
+    return false;
+  }
+  if (d.getTime() < today.getTime()) {
+    // Past: visible only if completed on that date
+    return !isDoneOn(t, d);
+  }
+  // Future: hidden
+  return true;
 }
 
 // Is the task considered "done" on this specific date?
@@ -131,6 +157,15 @@ export { addDays, addMonths, addWeeks, addYears, isSameDay, parseISO };
 
 // --- Production calendar (Russian holidays / weekends) ---
 // Fixed-date public holidays of Russia (month is 0-based in JS Date).
+// According to Art. 112 Labor Code of RF:
+// 1, 2, 3, 4, 5, 6 and 8 January — New Year holidays (Новогодние каникулы)
+// 7 January — Christmas (Рождество Христово)
+// 23 February — Defender of the Fatherland Day
+// 8 March — International Women's Day
+// 1 May — Spring and Labour Day
+// 9 May — Victory Day
+// 12 June — Russia Day
+// 4 November — Unity Day
 const FIXED_HOLIDAYS: ReadonlyArray<[number, number]> = [
   [0, 1],   // 1 Jan — New Year
   [0, 2],   // 2 Jan — New Year holidays
@@ -138,14 +173,14 @@ const FIXED_HOLIDAYS: ReadonlyArray<[number, number]> = [
   [0, 4],   // 4 Jan — New Year holidays
   [0, 5],   // 5 Jan — New Year holidays
   [0, 6],   // 6 Jan — New Year holidays
-  [0, 7],   // 7 Jan — Christmas (Jan 7)
-  [1, 22],  // 23 Feb — Defender of the Fatherland Day
-  [2, 7],   // 8 Mar — International Women's Day
+  [0, 7],   // 7 Jan — Christmas
+  [0, 8],   // 8 Jan — New Year holidays
+  [1, 23],  // 23 Feb — Defender of the Fatherland Day
+  [2, 8],   // 8 Mar — International Women's Day
   [4, 1],   // 1 May — Spring and Labour Day
-  [4, 8],   // 9 May — Victory Day
-  [5, 11],  // 12 Jun — Russia Day
-  [10, 4],  // 4 Nov — Unity Day (День народного единства)
-  [10, 7],  // 7 Nov — October Revolution anniversary
+  [4, 9],   // 9 May — Victory Day
+  [5, 12],  // 12 Jun — Russia Day
+  [10, 4],  // 4 Nov — Unity Day
 ];
 
 // Returns true for weekends (Sat/Sun) and fixed public holidays.

@@ -95,6 +95,7 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
   const [color, setColor] = useState(initial?.color ?? '');
   const [priority, setPriority] = useState<Priority>(initial?.priority ?? 'normal');
   const [unplanned, setUnplanned] = useState(initial?.unplanned ?? false);
+  const [sameDayOnly, setSameDayOnly] = useState(initial?.sameDayOnly ?? false);
   
   // Store subtasks as objects with id and title
   const initSubtasks = (): Subtask[] => {
@@ -134,7 +135,12 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
 
   const titleRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => { titleRef.current?.focus(); }, []);
+  useEffect(() => {
+    // Only auto-focus on desktop devices to avoid automatically popping up mobile keyboard
+    if (window.innerWidth > 720) {
+      titleRef.current?.focus();
+    }
+  }, []);
 
   // Escape closes the popover first, then the modal.
   useEffect(() => {
@@ -177,6 +183,7 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
       color: color || undefined,
       priority,
       unplanned,
+      sameDayOnly,
     };
     if (isEditing) {
       store.update(editingId, payload);
@@ -234,6 +241,13 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
     return fmt.dayFull(s);
   })();
 
+  // Handle removing a subtask from local state
+  const handleRemoveSubtask = (idx: number) => {
+    setSubtasks(subtasks.filter((_, i) => i !== idx));
+  };
+
+  const mouseDownTarget = useRef<EventTarget | null>(null);
+
   if (showYearPicker) {
     return (
       <DatePickerModal
@@ -259,13 +273,20 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
     );
   }
 
-  // Handle removing a subtask from local state
-  const handleRemoveSubtask = (idx: number) => {
-    setSubtasks(subtasks.filter((_, i) => i !== idx));
-  };
-
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div
+      className="modal-backdrop"
+      onMouseDown={(e) => {
+        mouseDownTarget.current = e.target;
+      }}
+      onClick={(e) => {
+        // Only close if mouse down ALSO started on the backdrop,
+        // preventing accidental closing when highlighting/dragging text out of inputs!
+        if (e.target === e.currentTarget && mouseDownTarget.current === e.currentTarget) {
+          onClose();
+        }
+      }}
+    >
       <div className="modal task-modal" onClick={(e) => e.stopPropagation()}>
 
         {/* Top row: date on the left (opens the calendar), tools on the right */}
@@ -644,6 +665,13 @@ export function TaskModal({ initial, editingId, selectedDate, onClose }: Props) 
           <input type="checkbox" checked={unplanned}
             onChange={(e) => setUnplanned(e.target.checked)} />
           <span className="backlog-label">Бэклог</span>
+        </label>
+
+        {/* Same-day-only toggle */}
+        <label className="backlog-row" title="Показывать задачу только в день наступления (не показывать заранее)">
+          <input type="checkbox" checked={sameDayOnly}
+            onChange={(e) => setSameDayOnly(e.target.checked)} />
+          <span className="backlog-label">Отобразить день в день</span>
         </label>
 
         <div className="modal-actions">

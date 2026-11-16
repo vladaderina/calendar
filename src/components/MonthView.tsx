@@ -36,7 +36,16 @@ export function MonthView({ anchor, onEdit, onPickDate }: Props) {
     return Array.from({ length: 36 }, (_, i) => addMonths(start, i - 12));
   }, [anchor]);
 
-  useEffect(() => { anchorRef.current?.scrollIntoView({ block: 'start' }); }, []);
+  useEffect(() => {
+    if (window.innerWidth <= 720 && anchorRef.current) {
+      const contentEl = anchorRef.current.closest('.content') as HTMLElement | null;
+      if (contentEl) {
+        contentEl.scrollTo({ top: Math.max(0, anchorRef.current.offsetTop - 8) });
+      }
+    } else {
+      anchorRef.current?.scrollIntoView({ block: 'start' });
+    }
+  }, []);
 
   const coloredTasks = (d: Date) =>
     sortByPriority(

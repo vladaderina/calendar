@@ -69,9 +69,17 @@ export function WeekView({ anchor, onEdit, onPickDate }: Props) {
   const todayCellRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // On small screens, scroll today's cell into view on load
+    // On small screens, scroll today's cell inside .content on load without moving window/viewport
     if (window.innerWidth <= 720 && todayCellRef.current) {
-      todayCellRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const contentEl = todayCellRef.current.closest('.content') as HTMLElement | null;
+      if (contentEl) {
+        // Measure position relative to content container with generous safety offset (60px)
+        // so the cell-header (date + day of week) is never obscured under top padding
+        const contentRect = contentEl.getBoundingClientRect();
+        const cellRect = todayCellRef.current.getBoundingClientRect();
+        const targetScrollTop = contentEl.scrollTop + (cellRect.top - contentRect.top) - 60;
+        contentEl.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' });
+      }
     }
   }, []);
 

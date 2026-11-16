@@ -1,15 +1,57 @@
 import { useEffect, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
-import { initAuth, onAuthChange, signInWithPassword, signUpWithPassword } from '../lib/auth';
+import {
+  initAuth,
+  onAuthChange,
+  signInWithPassword,
+  signUpWithPassword,
+  linkEmailToAccount,
+} from '../lib/auth';
+import { pushLocalToServer, useTasks } from '../store';
 
 interface AuthGateProps {
   onUserLoaded: (user: User | null) => void;
   children: React.ReactNode;
 }
 
+const ANON_DISMISS_KEY = 'calendar.auth.anonDismissed.v1';
+
+// `is_anonymous` marks a session created by the old "sign in anonymously" flow.
+// Such a session looks like a normal login, so the app skipped the login screen
+// and kept a private copy of the data: one calendar on the phone, another on the
+// laptop, both "logged in", nothing shared. Those sessions are caught here.
+const isAnon = (u: User | null) => Boolean((u as unknown as { is_anonymous?: boolean })?.is_anonymous);
+
 export function AuthGate({ onUserLoaded, children }: AuthGateProps) {
   const [user, setUser] = useState<User | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [anonDismissed, setAnonDismissed] = useState(() => {
+    try { return sessionStorage.getItem(ANON_DISMISS_KEY) === '1'; } catch { return false; }
+  });
+  // A dropped connection must not look like a logout. Supabase only reports
+  // "no session" when it has thrown one away; if the radio is off, the honest
+  // answer is "no network", not a login form that will fail anyway.
+  const [offline, setOffline] = useState(() => (typeof navigator !== 'undefined' ? !navigator.onLine : false));
+
+  useEffect(() => {
+    const goOnline = () => {
+      setOffline(false);
+      // Coming back from a dead link: retry the stored session once.
+      void initAuth().then((u) => {
+        if (u) {
+          setUser(u);
+          onUserLoaded(u);
+        }
+      });
+    };
+    const goOffline = () => setOffline(true);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, [onUserLoaded]);
 
   useEffect(() => {
     void initAuth().then((u) => {
@@ -33,6 +75,18 @@ export function AuthGate({ onUserLoaded, children }: AuthGateProps) {
     );
   }
 
+  if (user && isAnon(user) && !anonDismissed) {
+    return (
+      <LinkAccountForm
+        user={user}
+        onSkip={() => {
+          try { sessionStorage.setItem(ANON_DISMISS_KEY, '1'); } catch {}
+          setAnonDismissed(true);
+        }}
+      />
+    );
+  }
+
   if (user) {
     return (
       <div style={{ position: 'relative', width: '100%', height: '100%' }}>
@@ -41,7 +95,180 @@ export function AuthGate({ onUserLoaded, children }: AuthGateProps) {
     );
   }
 
+  if (offline) {
+    return (
+      <div style={loadingContainerStyle}>
+        <div style={{ maxWidth: 380, textAlign: 'center', padding: '0 24px' }}>
+          <div style={{ fontSize: 17, fontWeight: 600, marginBottom: 8 }}>Нет связи</div>
+          <div style={{ fontSize: 14, opacity: 0.7, lineHeight: 1.5, marginBottom: 20 }}>
+            Устройство не в сети — календарь откроется, как только появится интернет.
+            Выходить из аккаунта не нужно.
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => {
+              void initAuth().then((u) => {
+                setUser(u);
+                onUserLoaded(u);
+                if (!u) setOffline(false);
+              });
+            }}
+          >
+            Повторить
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return <AuthForm />;
+}
+
+// Shown when this device sits on an anonymous session: its rows live under a
+// user_id nobody else can log into. Linking an email keeps that user_id (so the
+// calendar stays as it is and becomes reachable from other devices); signing
+// into an existing account moves this device's rows into it instead.
+function LinkAccountForm({ user, onSkip }: { user: User; onSkip: () => void }) {
+  const tasks = useTasks();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [mode, setMode] = useState<'link' | 'switch'>('link');
+  const [message, setMessage] = useState('');
+  const [okMessage, setOkMessage] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !password) return;
+    setLoading(true);
+    setMessage('');
+    setOkMessage(false);
+
+    if (mode === 'link') {
+      const r = await linkEmailToAccount(email, password);
+      setLoading(false);
+      setOkMessage(r.ok);
+      setMessage(r.message);
+      return;
+    }
+
+    const signIn = await signInWithPassword(email, password);
+    if (!signIn.ok) {
+      setLoading(false);
+      setMessage(signIn.message);
+      return;
+    }
+    // Native rows of the target account are pulled by the app's normal load;
+    // what this device holds must go the other way before it can be merged.
+    const push = await pushLocalToServer();
+    setLoading(false);
+    setOkMessage(push.ok);
+    setMessage(push.ok ? `Вошли в аккаунт и перенесли данные: ${push.message}` : push.message);
+  };
+
+  return (
+    <div style={containerStyle}>
+      <div style={cardStyle}>
+        <div style={headerStyle}>
+          <h1 style={titleStyle}>Данные пока только здесь</h1>
+          <p style={subtitleStyle}>
+            На этом устройстве {tasks.length} задач в отдельном профиле без email. Поэтому телефон и
+            ноутбук показывают разное. Привяжите email — данные останутся на месте и появятся на
+            всех устройствах.
+          </p>
+        </div>
+
+        <div style={tabsStyle}>
+          <button
+            type="button"
+            onClick={() => { setMode('link'); setMessage(''); }}
+            style={{
+              ...tabStyle,
+              borderBottom: mode === 'link' ? '2px solid #111' : '2px solid transparent',
+              color: mode === 'link' ? '#111' : '#666',
+              fontWeight: mode === 'link' ? 600 : 400,
+            }}
+          >
+            Привязать email
+          </button>
+          <button
+            type="button"
+            onClick={() => { setMode('switch'); setMessage(''); }}
+            style={{
+              ...tabStyle,
+              borderBottom: mode === 'switch' ? '2px solid #111' : '2px solid transparent',
+              color: mode === 'switch' ? '#111' : '#666',
+              fontWeight: mode === 'switch' ? 600 : 400,
+            }}
+          >
+            Войти в другой
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} style={formStyle}>
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Email</label>
+            <input
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="name@example.com"
+              style={inputStyle}
+              disabled={loading}
+              autoComplete="email"
+            />
+          </div>
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Пароль</label>
+            <input
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              style={inputStyle}
+              disabled={loading}
+              autoComplete={mode === 'link' ? 'new-password' : 'current-password'}
+            />
+          </div>
+
+          {message && (
+            <div style={{
+              ...messageStyle,
+              background: okMessage ? '#e6f4ea' : '#fce8e6',
+              color: okMessage ? '#137333' : '#c5221f',
+            }}>
+              {message}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading || !email || !password}
+            style={{ ...submitBtnStyle, opacity: loading || !email || !password ? 0.6 : 1 }}
+          >
+            {loading ? 'Загрузка...' : mode === 'link' ? 'Привязать и сохранить' : 'Войти и перенести данные'}
+          </button>
+        </form>
+
+        <p style={{ ...subtitleStyle, marginTop: '16px', fontSize: '13px' }}>
+          {mode === 'link'
+            ? 'Этот профиль ' + (user.id ? user.id.slice(0, 8) : '') + '… станет обычным аккаунтом — задачи никуда не денутся.'
+            : 'Задачи с этого устройства отправятся в указанный аккаунт. На сервере ничего не удаляется.'}
+        </p>
+
+        <button
+          type="button"
+          onClick={onSkip}
+          style={{ ...tabStyle, marginTop: '8px', color: '#666', fontSize: '13px' }}
+        >
+          Продолжить без привязки
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function AuthForm() {

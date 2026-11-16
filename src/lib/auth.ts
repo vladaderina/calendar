@@ -64,6 +64,38 @@ export async function signOut(): Promise<void> {
   currentUser = null;
 }
 
+// An anonymous session (created by an older build that signed in anonymously)
+// is a FULL account with its own user_id: the app skips the login screen, this
+// device keeps its own dataset, and every other device — signed into a real
+// email account — sees a different calendar. The session survives silently, so
+// the split never heals by itself. Detect it and make the user link an email,
+// which keeps the same user_id and therefore all existing rows.
+export function isAnonymousSession(): boolean {
+  return Boolean((currentUser as unknown as { is_anonymous?: boolean })?.is_anonymous);
+}
+
+export type LinkResult = { ok: true; message: string } | { ok: false; message: string };
+
+// Attaching an email/password to the CURRENT (anonymous) account keeps the same
+// user_id, so every task already stored under it stays in place — no export,
+// no re-upload. If email confirmation is enabled in the Supabase project, the
+// identity is only linked after the link in the letter is clicked; the caller
+// gets a message that says so instead of a false "done".
+export async function linkEmailToAccount(email: string, password: string): Promise<LinkResult> {
+  if (!supabase) return { ok: false, message: 'Supabase не настроен' };
+  if (password.length < 6) return { ok: false, message: 'Пароль слишком короткий (минимум 6 символов)' };
+  const { data, error } = await supabase.auth.updateUser({ email, password });
+  if (error) return { ok: false, message: describeAuthError(error.message) };
+  if (data.user) currentUser = data.user;
+  const linked = data.user?.email === email;
+  return {
+    ok: true,
+    message: linked
+      ? 'Готово: email привязан. Войдите этим адресом на другом устройстве — календарь будет общим.'
+      : 'Проверьте почту и перейдите по ссылке из письма. Задачи уже сохранены за этим аккаунтом.',
+  };
+}
+
 export function getUserId(): string | null {
   return currentUser?.id ?? null;
 }

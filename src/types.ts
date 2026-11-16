@@ -46,6 +46,9 @@ export interface Task {
   excludedDates?: string[];
   // For recurring tasks: last active date (used by "эта и все последующие").
   recurrenceUntil?: string;
+  /** When true, task is only displayed day-in-day: on its occurrence day if today,
+   *  or in the past if completed. Never in future or uncompleted past day cells. */
+  sameDayOnly?: boolean;
   /** Subtask IDs (ordered). Subtasks are themselves Task records with */
   /** `subtaskOf` pointing back to this task's id. */
   subtaskIds?: string[];
@@ -54,7 +57,7 @@ export interface Task {
   createdAt: string;
 }
 
-export type View = 'dashboard' | 'day' | 'week' | 'month' | 'year' | 'planned' | 'analytics';
+export type View = 'dashboard' | 'day' | 'week' | 'month' | 'year' | 'wheel' | 'planned' | 'analytics';
 
 /** Name of the implicit topic every category has and cannot delete. */
 export const DEFAULT_TOPIC = 'Основное';
