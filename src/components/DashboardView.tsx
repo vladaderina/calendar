@@ -33,6 +33,7 @@ import {
 import { applyLinkedTasks, docMarkdown } from '../lib/doc';
 import { checkCounts } from '../lib/md';
 import { upgradeDashboardModel } from '../lib/migrate';
+import { restoreLostNotes } from '../lib/restore';
 import { PageView } from './PageView';
 
 interface Props {
@@ -164,6 +165,9 @@ export function DashboardView({ onEdit }: Props) {
     void hydrateBoard().then(() => {
       if (cancelled) return;
       retryLocalPersist();
+      // Notes wiped by an earlier build first, then the model upgrade — the
+      // upgrade must see the restored text, never the other way round.
+      restoreLostNotes();
       upgradeDashboardModel();
     });
     return () => { cancelled = true; };

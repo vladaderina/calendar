@@ -381,8 +381,8 @@ export function updateBoardNote(id: string, patch: { text?: string; color?: stri
 }
 
 /** Create an empty note-document — the file the tree shows as a note. */
-export function addBoardDoc(title: string, nodeKey = '', md = ''): BoardDoc {
-  const id = uuid();
+export function addBoardDoc(title: string, nodeKey = '', md = '', forcedId?: string): BoardDoc {
+  const id = forcedId ?? uuid();
   const now = Date.now();
   const doc: BoardDoc = {
     id,
@@ -552,7 +552,10 @@ function toRow(item: BoardItem, userId: string): Row & { user_id: string } {
   const payload: Record<string, unknown> = item.kind === 'photo'
     ? { data: item.data, caption: item.caption, born: item.born, nodeKey: item.nodeKey }
     : item.kind === 'doc'
-      ? { title: item.title, blocks: item.blocks, born: item.born, nodeKey: item.nodeKey }
+      // `md` and `links` MUST travel: they are the note itself. Leaving them
+      // out of the payload meant every pull replaced a note with an empty
+      // document — the text lived only in one browser's localStorage.
+      ? { title: item.title, md: item.md ?? '', links: item.links ?? {}, blocks: item.blocks, born: item.born, nodeKey: item.nodeKey }
       : { text: item.text, color: item.color, born: item.born, nodeKey: item.nodeKey };
   return { id: item.id, user_id: userId, kind: item.kind, payload, t: item.t, deleted: item.deleted === true };
 }
@@ -579,6 +582,10 @@ function fromRow(row: Record<string, unknown>): BoardItem | null {
       ...base,
       kind: 'doc',
       title: typeof payload.title === 'string' ? payload.title : '',
+      md: typeof payload.md === 'string' ? payload.md : undefined,
+      links: payload.links && typeof payload.links === 'object'
+        ? payload.links as Record<string, string>
+        : undefined,
       blocks: payload.blocks,
       nodeKey: typeof payload.nodeKey === 'string' ? payload.nodeKey : '',
       born: Number(payload.born) || undefined,
@@ -635,6 +642,16 @@ async function runSync(): Promise<void> {
     if (cur && cur.t >= t) continue;
     const incoming = fromRow(raw);
     if (!incoming) continue;
+    // A row written by a build that did not upload `md` carries the title but
+    // no text. Adopting it wholesale would delete the note in this browser, so
+    // the local text is kept and re-uploaded.
+    if (incoming.kind === 'doc' && cur?.kind === 'doc') {
+      if (!incoming.md && cur.md) {
+        incoming.md = cur.md;
+        incoming.t = Date.now();
+      }
+      if (!incoming.links && cur.links) incoming.links = cur.links;
+    }
     items[id] = incoming;
     adopted = true;
   }

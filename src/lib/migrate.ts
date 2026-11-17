@@ -29,8 +29,7 @@ import {
   saveBoardDoc,
   type BoardDoc,
 } from './board';
-import { legacyToMarkdown, nodeKeyParts, tasksOnPage } from './doc';
-import { plain } from './md';
+import { legacyToMarkdown } from './doc';
 import { pathKey, type BlockKind, type TreeNode } from './tree';
 
 /** New key on purpose: the old `calendar.pages.migrated.v1` flag was written by
@@ -99,41 +98,6 @@ function buildMarkdown(doc: BoardDoc): string {
   return legacyToMarkdown(doc, stickers, []);
 }
 
-const CHECK_LINE = /^\s*[-*+]\s+\[[ xX]\]\s+(.*)$/;
-
-/** Remove the checklist lines an earlier build appended to mirror the page's
- *  tasks. Only the trailing block that consists exclusively of such lines is
- *  dropped, and only for documents that were produced by that migration (they
- *  still carry legacy blocks) or for auto-named pages it created — a note the
- *  user typed herself is never touched. */
-function stripMirroredTasks(doc: BoardDoc): { md: string; stripped: number } {
-  const md = doc.md ?? '';
-  if (!md.trim()) return { md, stripped: 0 };
-  const hasBlocks = (doc.blocks ?? []).length > 0;
-  if (!hasBlocks && !AUTO_PAGE.test(doc.title ?? '')) return { md, stripped: 0 };
-
-  const { sphere, path } = nodeKeyParts(doc.nodeKey);
-  if (!sphere || !path.length) return { md, stripped: 0 };
-  const tasks = tasksOnPage(store.getTasks(), sphere, path);
-  if (!tasks.length) return { md, stripped: 0 };
-
-  const stickers = getBoardNotes().filter((note) => note.nodeKey === doc.nodeKey);
-  const base = (hasBlocks ? legacyToMarkdown(doc, stickers, []) : '').replace(/\s+$/, '');
-  if (!md.startsWith(base)) return { md, stripped: 0 };
-
-  const tail = md.slice(base.length).split('\n').filter((line) => line.trim());
-  if (!tail.length) return { md, stripped: 0 };
-  const titles = new Set(tasks.map((task) => plain(task.title).toLowerCase()));
-  const mirrored = tail.every((line) => {
-    const match = CHECK_LINE.exec(line);
-    if (!match) return false;
-    const text = match[1].replace(/\s*\^\d{4}-\d{2}-\d{2}\s*$/, '');
-    return titles.has(plain(text).toLowerCase());
-  });
-  if (!mirrored) return { md, stripped: 0 };
-  return { md: base ? `${base}\n` : '', stripped: tail.length };
-}
-
 /** Legacy blocks that sat on a category/folder: their pictures (and any
  *  stickers) move into a page of that container. Tasks are left where they are. */
 function upgradeContainers(): void {
@@ -157,22 +121,11 @@ function upgradeContainers(): void {
   }
 }
 
-/** Every page gets its Markdown; task mirrors from the previous build go away. */
+/** Every page gets its Markdown from the block document it used to hold. */
 function upgradeDocs(): void {
   for (const doc of getBoardDocs()) {
-    const { md, stripped } = stripMirroredTasks(doc);
-    // When the mirror was removed the result may be an EMPTY note on purpose —
-    // falling back to `buildMarkdown` there would read the old text back in.
-    const next = stripped ? md : (md || buildMarkdown(doc));
-    if (next !== (doc.md ?? '')) saveBoardDoc(doc.id, { md: next });
-    if (!stripped) continue;
-    // An auto page that only ever held that mirror is not a page the user made.
-    if (!next.trim() && AUTO_PAGE.test(doc.title ?? '')) {
-      const { sphere, path } = nodeKeyParts(doc.nodeKey);
-      if (sphere && path.length && !attachmentsUnder(doc.nodeKey)) {
-        store.removeTopic(sphere, path);
-      }
-    }
+    const md = buildMarkdown(doc);
+    if (md !== (doc.md ?? '')) saveBoardDoc(doc.id, { md });
   }
   collapseAutoPages();
 }
@@ -186,6 +139,7 @@ function collapseAutoPages(): void {
       const doc = page.node.noteId ? getBoardDoc(page.node.noteId) : null;
       if (doc?.md && doc.md.trim()) continue;
       if (attachmentsUnder(nodeKeyOf(sphere, page.path))) continue;
+      if (page.node.children.length) continue;
       const key = pathKey(page.path.slice(0, -1));
       groups.set(key, [...(groups.get(key) ?? []), page]);
     }
