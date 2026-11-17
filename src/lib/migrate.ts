@@ -1,18 +1,22 @@
 // Bring existing data into the "one blank note per page" model, and make sure
-// that NOTHING the user already has becomes invisible.
+// that NOTHING the user already wrote becomes invisible.
 //
 // Runs on every dashboard mount. It is written to be idempotent: while
 // localStorage was full even writing a "done" flag threw, so the flag is a hint,
 // not a guarantee.
 //
 //  1. A page document that still has the old block lines becomes a Markdown note
-//     (`doc.md`) — text lines as paragraphs, checkboxes with their day, stickers
-//     as quotes, and every task already filed to the page as a checklist line.
-//  2. A task filed to something that cannot show it (a category, a folder, or
-//     nothing) is pulled into a page of its own and written as a checklist line,
-//     so it is visible in the dashboard again.
+//     (`doc.md`): text lines as paragraphs, checkboxes with their day, stickers
+//     as quotes. Tasks are NOT copied in — the dashboard is the place for the
+//     user's own writing, the calendar is the place for tasks.
+//  2. An earlier version DID copy a page's tasks into its note as a mirror. That
+//     tail is removed again (only when it is verifiably the mirror, see
+//     `stripMirroredTasks`), so the boards stop showing hundreds of items the
+//     user never wrote there.
 //  3. Duplicate auto pages left by the earlier half-failed migrations collapse
-//     into one.
+//     into one; empty auto pages that only ever held a task mirror are dropped.
+//  4. A category/folder that still carries a moodboard/notes block keeps its
+//     pictures: they move to a page of that container.
 import { store } from '../store';
 import {
   addBoardDoc,
@@ -23,14 +27,15 @@ import {
   removeBoardItem,
   rekeyNode,
   saveBoardDoc,
+  type BoardDoc,
 } from './board';
-import { legacyToMarkdown, linedTitles, nodeKeyParts, tasksOnPage } from './doc';
+import { legacyToMarkdown, nodeKeyParts, tasksOnPage } from './doc';
 import { plain } from './md';
 import { pathKey, type BlockKind, type TreeNode } from './tree';
 
 /** New key on purpose: the old `calendar.pages.migrated.v1` flag was written by
  *  the block-based model, and this pass must run once more. */
-const FLAG_KEY = 'calendar.notes.v1';
+const FLAG_KEY = 'calendar.notes.v2';
 const AUTO_PAGE = /^страница( \d+)?$/;
 const SEP = '\u001F';
 
@@ -67,7 +72,8 @@ function uniqueName(taken: string[], base: string): string {
   return `${base} ${n}`;
 }
 
-/** The page (document) of a container, created when there is none. */
+/** The page (document) of a container, created when there is none. Only used to
+ *  keep pictures/stickers that used to live on a category or folder. */
 function ensurePage(sphere: string, parentPath: string[]): { path: string[]; noteId?: string } | null {
   const existing = pagesOf(sphere)
     .find((page) => pathKey(page.path.slice(0, -1)) === pathKey(parentPath));
@@ -86,37 +92,57 @@ function ensurePage(sphere: string, parentPath: string[]): { path: string[]; not
   return { path };
 }
 
-/** Markdown of a document, with every task of the page represented by a line. */
-function buildMarkdown(docId: string, sphere: string, path: string[]): string {
-  const doc = getBoardDoc(docId);
-  if (!doc) return '';
-  const tasks = tasksOnPage(store.getTasks(), sphere, path);
+/** Markdown of a page: what the user wrote in the block era, verbatim. */
+function buildMarkdown(doc: BoardDoc): string {
+  if (typeof doc.md === 'string' && doc.md.trim()) return doc.md;
   const stickers = getBoardNotes().filter((note) => note.nodeKey === doc.nodeKey);
-  const base = typeof doc.md === 'string' && doc.md.trim() ? doc.md : legacyToMarkdown(doc, stickers, tasks);
-  const lined = linedTitles(base);
-  const missing = tasks.filter((task) => !lined.has(plain(task.title).toLowerCase()));
-  if (!missing.length) return base;
-  const tail = missing
-    .map((task) => `- [${task.completed ? 'x' : ' '}] ${plain(task.title)}${task.startDate ? ` ^${task.startDate}` : ''}`)
-    .join('\n');
-  const body = base.replace(/\s+$/, '');
-  return body ? `${body}\n\n${tail}\n` : `${tail}\n`;
+  return legacyToMarkdown(doc, stickers, []);
 }
 
-/** Legacy blocks that sat on a category/folder: their tasks (and any stickers or
- *  pictures) move into a page of that container. */
+const CHECK_LINE = /^\s*[-*+]\s+\[[ xX]\]\s+(.*)$/;
+
+/** Remove the checklist lines an earlier build appended to mirror the page's
+ *  tasks. Only the trailing block that consists exclusively of such lines is
+ *  dropped, and only for documents that were produced by that migration (they
+ *  still carry legacy blocks) or for auto-named pages it created — a note the
+ *  user typed herself is never touched. */
+function stripMirroredTasks(doc: BoardDoc): { md: string; stripped: number } {
+  const md = doc.md ?? '';
+  if (!md.trim()) return { md, stripped: 0 };
+  const hasBlocks = (doc.blocks ?? []).length > 0;
+  if (!hasBlocks && !AUTO_PAGE.test(doc.title ?? '')) return { md, stripped: 0 };
+
+  const { sphere, path } = nodeKeyParts(doc.nodeKey);
+  if (!sphere || !path.length) return { md, stripped: 0 };
+  const tasks = tasksOnPage(store.getTasks(), sphere, path);
+  if (!tasks.length) return { md, stripped: 0 };
+
+  const stickers = getBoardNotes().filter((note) => note.nodeKey === doc.nodeKey);
+  const base = (hasBlocks ? legacyToMarkdown(doc, stickers, []) : '').replace(/\s+$/, '');
+  if (!md.startsWith(base)) return { md, stripped: 0 };
+
+  const tail = md.slice(base.length).split('\n').filter((line) => line.trim());
+  if (!tail.length) return { md, stripped: 0 };
+  const titles = new Set(tasks.map((task) => plain(task.title).toLowerCase()));
+  const mirrored = tail.every((line) => {
+    const match = CHECK_LINE.exec(line);
+    if (!match) return false;
+    const text = match[1].replace(/\s*\^\d{4}-\d{2}-\d{2}\s*$/, '');
+    return titles.has(plain(text).toLowerCase());
+  });
+  if (!mirrored) return { md, stripped: 0 };
+  return { md: base ? `${base}\n` : '', stripped: tail.length };
+}
+
+/** Legacy blocks that sat on a category/folder: their pictures (and any
+ *  stickers) move into a page of that container. Tasks are left where they are. */
 function upgradeContainers(): void {
   const tree = store.getTree();
   const visit = (sphere: string, path: string[], blocks: BlockKind[], children: TreeNode[]): void => {
     if (blocks.length) {
       const key = nodeKeyOf(sphere, path);
-      const direct = store.getTasks().filter((task) => task.sphere === sphere
-        && (path.length ? (task.topic ?? '') === pathKey(path) : !task.topic));
-      const hasStuff = direct.length > 0
-        || blocks.includes('moodboard')
-        || blocks.includes('notes')
-        || attachmentsUnder(key);
-      if (hasStuff) {
+      const keepsPictures = blocks.includes('moodboard') || blocks.includes('notes') || attachmentsUnder(key);
+      if (keepsPictures) {
         const page = ensurePage(sphere, path);
         if (page) rekeyNode(key, nodeKeyOf(sphere, page.path));
       }
@@ -131,76 +157,29 @@ function upgradeContainers(): void {
   }
 }
 
-/** Every page gets its Markdown. */
+/** Every page gets its Markdown; task mirrors from the previous build go away. */
 function upgradeDocs(): void {
-  // 1. Documents → Markdown.
   for (const doc of getBoardDocs()) {
-    const { sphere, path } = nodeKeyParts(doc.nodeKey);
-    if (!sphere || !path.length) continue;
-    const md = buildMarkdown(doc.id, sphere, path);
-    if (md !== (doc.md ?? '')) saveBoardDoc(doc.id, { md });
-  }
-
-  // 2. Tasks on a folder (or nowhere) must land on a page — but only while the
-  // model is being upgraded. Doing it on EVERY mount would resurrect a page the
-  // user has just deleted, because its tasks (deliberately kept) would look
-  // homeless again: deleting a page must feel like deleting it.
-  if (!flagSet()) collectTasks();
-  collapseAutoPages();
-}
-
-/** Pull every task that has no page into the page of its container. */
-export function collectTasks(sphereFilter?: string): void {
-  for (const task of store.getTasks()) {
-    const sphere = task.sphere;
-    if (!sphere || (sphereFilter && sphere !== sphereFilter)) continue;
-    const parts = task.topic ? task.topic.split(SEP) : [];
-    const onPage = parts.length
-      ? getBoardDocs().some((doc) => doc.nodeKey === nodeKeyOf(sphere, parts))
-      : false;
-    if (onPage) continue;
-    const target = ensurePage(sphere, parts);
-    if (!target) continue;
-    const key = nodeKeyOf(sphere, target.path);
-    const doc = getBoardDocs().find((item) => item.nodeKey === key);
-    if (!doc) continue;
-    const md = buildMarkdown(doc.id, sphere, target.path);
-    if (!linedTitles(md).has(plain(task.title).toLowerCase())) {
-      const body = md.replace(/\s+$/, '');
-      saveBoardDoc(doc.id, {
-        md: `${body ? `${body}\n\n` : ''}- [${task.completed ? 'x' : ' '}] ${plain(task.title)}${task.startDate ? ` ^${task.startDate}` : ''}\n`,
-      });
+    const { md, stripped } = stripMirroredTasks(doc);
+    // When the mirror was removed the result may be an EMPTY note on purpose —
+    // falling back to `buildMarkdown` there would read the old text back in.
+    const next = stripped ? md : (md || buildMarkdown(doc));
+    if (next !== (doc.md ?? '')) saveBoardDoc(doc.id, { md: next });
+    if (!stripped) continue;
+    // An auto page that only ever held that mirror is not a page the user made.
+    if (!next.trim() && AUTO_PAGE.test(doc.title ?? '')) {
+      const { sphere, path } = nodeKeyParts(doc.nodeKey);
+      if (sphere && path.length && !attachmentsUnder(doc.nodeKey)) {
+        store.removeTopic(sphere, path);
+      }
     }
-    store.update(task.id, { topic: pathKey(target.path) });
   }
-}
-
-/** Append the tasks filed directly to a container into its page (creating the
- *  page when the container has none). Used by the «собрать в страницу» button:
- *  deleting a page keeps its tasks, and this is how they come back. */
-export function adoptContainerTasks(sphere: string, path: string[]): void {
-  const key = pathKey(path);
-  const tasks = store.getTasks().filter((task) => task.sphere === sphere && (task.topic ?? '') === key);
-  if (!tasks.length) return;
-  const target = ensurePage(sphere, path);
-  if (!target) return;
-  const pageKey = nodeKeyOf(sphere, target.path);
-  const doc = getBoardDocs().find((item) => item.nodeKey === pageKey);
-  if (!doc) return;
-  let md = buildMarkdown(doc.id, sphere, target.path);
-  for (const task of tasks) {
-    if (linedTitles(md).has(plain(task.title).toLowerCase())) continue;
-    const body = md.replace(/\s+$/, '');
-    md = `${body ? `${body}\n\n` : ''}- [${task.completed ? 'x' : ' '}] ${plain(task.title)}${task.startDate ? ` ^${task.startDate}` : ''}\n`;
-  }
-  saveBoardDoc(doc.id, { md });
-  for (const task of tasks) store.update(task.id, { topic: pathKey(target.path) });
+  collapseAutoPages();
 }
 
 /** Collapse duplicate auto pages of the same container. */
 function collapseAutoPages(): void {
-  const spheres = store.getSpheres();
-  for (const sphere of spheres) {
+  for (const sphere of store.getSpheres()) {
     const groups = new Map<string, { path: string[]; node: TreeNode }[]>();
     for (const page of pagesOf(sphere)) {
       if (!AUTO_PAGE.test(page.path[page.path.length - 1])) continue;
@@ -238,3 +217,5 @@ export function upgradeDashboardModel(): void {
     // quota — it simply runs again next time, which is harmless
   }
 }
+
+void flagSet;

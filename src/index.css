@@ -4385,3 +4385,42 @@ input, select, textarea { font-family: inherit; }
 .dsh-unfiled-text { font-size: 12px; color: #7d838c; }
 .dsh-unfiled-btn { font-size: 12px; font-weight: 600; color: var(--accent); white-space: nowrap; }
 .dsh-unfiled-btn:hover { text-decoration: underline; }
+
+/* ============ PAGE EDITS AFTER THE FEEDBACK ROUND ============ */
+/* The folder name is an editable field now: it must look like the old <h1>. */
+input.dsh-folder-title {
+  border: 0;
+  background: transparent;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink, #1d2126);
+  width: 100%;
+  max-width: 520px;
+  border-radius: 6px;
+}
+input.dsh-folder-title:hover { background: rgba(0, 0, 0, 0.03); }
+input.dsh-folder-title:focus { outline: 2px solid rgba(47, 111, 237, 0.35); background: #fff; padding-left: 6px; }
+
+.pg-foot-hint { font-size: 12px; color: #8b929b; }
+
+/* «→ задача» is the one visible action on a checklist line. */
+.md-plan-btn {
+  font-size: 12px;
+  font-weight: 600;
+  color: #2f6fed;
+  border: 1px solid rgba(47, 111, 237, 0.35);
+  background: rgba(47, 111, 237, 0.07);
+  border-radius: 999px;
+  padding: 2px 9px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.md-plan-btn:hover { background: rgba(47, 111, 237, 0.14); }
+.md-plan-btn.is-set {
+  color: #4a5058;
+  border-color: rgba(0, 0, 0, 0.14);
+  background: rgba(0, 0, 0, 0.04);
+}

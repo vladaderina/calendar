@@ -26,7 +26,6 @@ import {
   reorderLevel,
   type BlockKind,
   type Tree,
-  type TreeNode,
 } from './lib/tree';
 
 const TASKS_KEY = 'calendar.tasks.v1';
@@ -103,44 +102,6 @@ let lastView: string = loadView();
 //
 // Deleting a topic also clears `topic` on its tasks and renaming rewrites them,
 // so a restored tab is never a topic the user removed on purpose.
-function ensureTaskPath(tree: Tree, sphere: string, path: string[]): Tree {
-  const category = tree[sphere] ?? emptyCategory();
-  let list = category.children;
-  let existing = 0;
-  for (const name of path) {
-    const found = list.find((node) => node.name === name);
-    if (!found) break;
-    existing += 1;
-    list = found.children;
-  }
-  if (existing === path.length) return tree;
-  // Build the missing tail as a chain; these nodes exist only because a task
-  // points at them, so they get a tasks block.
-  let chain: TreeNode | null = null;
-  for (let i = path.length - 1; i >= existing; i--) {
-    chain = { ...newNode(path[i], ['tasks']), children: chain ? [chain] : [] };
-  }
-  if (!chain) return tree;
-  const children = existing ? insertNode(category.children, path.slice(0, existing), chain) : [...category.children, chain];
-  return { ...tree, [sphere]: { ...category, children } };
-}
-
-function restoreTopicsFromTasks(): void {
-  let next: Tree | null = null;
-  for (const task of tasks) {
-    const sphere = task.sphere;
-    const topic = task.topic;
-    if (!sphere || !topic || topic === DEFAULT_TOPIC) continue;
-    if (!spheres.includes(sphere)) continue;
-    const path = keyPath(topic);
-    if (!path.length || path.length > MAX_LEVEL - 1) continue;
-    const before: Tree = next ?? topics;
-    const after = ensureTaskPath(before, sphere, path);
-    if (after !== before) next = after;
-  }
-  if (next) topics = next;
-}
-
 /** Categories that exist without a tree entry (data from before folders/blocks,
  *  or a row inserted straight into the database) would open with NO blocks and
  *  look empty although they hold tasks. Give them a tasks block once. A category
@@ -164,7 +125,6 @@ function ensureCategoryTrees(): void {
   }
 }
 
-restoreTopicsFromTasks();
 ensureCategoryTrees();
 
 const snapshot = { tasks, spheres, topics, journal, lastView };
@@ -255,10 +215,10 @@ export function retryLocalPersist(): void {
 }
 
 function emit() {
-  // Never let a task's sub-category exist without its tab (see
-  // restoreTopicsFromTasks): a task whose topic has no tab is invisible on the
-  // dashboard, which reads to the user as "задачи пропали".
-  restoreTopicsFromTasks();
+  // The dashboard is built from the tree the user keeps herself and is NOT
+  // derived from tasks any more: pulling a task's topic into the tree created
+  // surprise folders/pages next to the real ones (read as "a duplicate page
+  // with a dropdown of itself").
   // Queue only the task rows that were added, changed, or removed. Identity
   // comparison is enough: every mutating store method builds new Task objects
   // rather than editing in place.
@@ -452,15 +412,6 @@ async function applyRemoteTasks(rows: any[], userId: string): Promise<void> {
   saveServerIds();
   prevTaskSnapshot = new Map(tasks.map((t) => [t.id, t]));
   snapshot.tasks = tasks;
-  // Server rows may carry sub-categories this device's tab list lost; rebuild
-  // the tabs now so the dashboard shows them without waiting for an edit.
-  const topicsBeforeRestore = JSON.stringify(topics);
-  restoreTopicsFromTasks();
-  if (JSON.stringify(topics) !== topicsBeforeRestore) {
-    snapshot.topics = topics;
-    saveLocal(TOPICS_KEY, JSON.stringify(topics));
-    scheduleSync();
-  }
   localStorage.setItem(TASKS_KEY, JSON.stringify(tasks));
   listeners.forEach((l) => l());
 }

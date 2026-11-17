@@ -103,6 +103,79 @@ export function linedTitles(md: string): Set<string> {
   return out;
 }
 
+/** A checklist line's identity inside a note: its text without marks or a day. */
+export function linkKey(text: string): string {
+  return plain(splitDate(text).text).toLowerCase();
+}
+
+/** The task a line stands for. `links` maps taskId → the line it was opened
+ *  from; a line without a link still matches a task by its title, so notes
+ *  written before links existed keep working. */
+export function taskOfLine(
+  links: Record<string, string> | undefined,
+  tasks: Task[],
+  text: string,
+): Task | undefined {
+  const key = linkKey(text);
+  if (!key) return undefined;
+  for (const [taskId, stored] of Object.entries(links ?? {})) {
+    if (stored !== key) continue;
+    const task = tasks.find((item) => item.id === taskId);
+    if (task) return task;
+  }
+  return tasks.find((task) => linkKey(task.title) === key);
+}
+
+/** Remember which task a line was opened from. */
+export function withLink(
+  links: Record<string, string> | undefined,
+  taskId: string,
+  text: string,
+): Record<string, string> {
+  return { ...(links ?? {}), [taskId]: linkKey(text) };
+}
+
+const CHECK_LINE = /^(\s*[-*+]\s+\[)([ xX])(\]\s?)(.*)$/;
+
+/** Make every LINKED line mirror its task: the tick and the day come from the
+ *  task, so changing them in the calendar dialog shows up in the note and vice
+ *  versa. Lines without a task are left exactly as the user typed them. */
+export function applyLinkedTasks(
+  md: string,
+  links: Record<string, string> | undefined,
+  tasks: Task[],
+): string {
+  if (!md) return md;
+  const keys = new Set(Object.values(links ?? {}));
+  const byTitle = new Map(tasks.map((task) => [linkKey(task.title), task]));
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const lineTask = (text: string): Task | undefined => {
+    const key = linkKey(text);
+    for (const [taskId, stored] of Object.entries(links ?? {})) {
+      if (stored === key) {
+        const task = byId.get(taskId);
+        if (task) return task;
+      }
+    }
+    return keys.size ? byTitle.get(key) : byTitle.get(key);
+  };
+
+  let changed = false;
+  const out = md.split('\n').map((raw) => {
+    const match = CHECK_LINE.exec(raw);
+    if (!match) return raw;
+    const task = lineTask(match[4]);
+    if (!task) return raw;
+    const { text } = splitDate(match[4]);
+    const done = task.completed ? 'x' : ' ';
+    const date = task.startDate ? ` ^${task.startDate}` : '';
+    const next = `${match[1]}${done}${match[3]}${text}${date}`;
+    if (next !== raw) changed = true;
+    return next;
+  });
+  return changed ? out.join('\n') : md;
+}
+
 /** Sphere + path encoded in a `nodeKey`. */
 export function nodeKeyParts(nodeKey: string): { sphere: string; path: string[] } {
   const [sphere, ...rest] = nodeKey.split('\u001F');

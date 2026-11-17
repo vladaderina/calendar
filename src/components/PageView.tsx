@@ -6,8 +6,9 @@ import type { ChangeEvent, KeyboardEvent } from 'react';
 import { store, useTasks } from '../store';
 import { addBoardPhoto, hydrateBoard, removeBoardItem, saveBoardDoc, useBoardNotes } from '../lib/board';
 import type { BoardDoc, BoardPhoto } from '../lib/board';
-import { docMarkdown, matchTask, tasksOnPage } from '../lib/doc';
-import { checkCounts, checkLines, plain, prefixLines, setDate, setDone, surround } from '../lib/md';
+import type { Task } from '../types';
+import { applyLinkedTasks, docMarkdown, taskOfLine, tasksOnPage, withLink } from '../lib/doc';
+import { checkCounts, checkLines, plain, prefixLines, setDone, surround } from '../lib/md';
 import { pathKey } from '../lib/tree';
 import { fileToDataUrl } from '../lib/image';
 import { MarkdownView } from './MarkdownView';
@@ -19,6 +20,8 @@ interface Props {
   photos: BoardPhoto[];
   onRename: (name: string) => void;
   onDelete: () => void;
+  /** Opens the calendar's own task dialog (day, note, colour, repeat, backlog). */
+  onEdit: (task: Task) => void;
 }
 
 const GOAL_TEMPLATE = `## Чего я хочу
@@ -37,18 +40,23 @@ const GOAL_TEMPLATE = `## Чего я хочу
 
 `;
 
-export function PageView({ sphere, path, doc, photos, onRename, onDelete }: Props) {
+export function PageView({ sphere, path, doc, photos, onRename, onDelete, onEdit }: Props) {
   const tasks = useTasks();
   const stickers = useBoardNotes();
   const [mode, setMode] = useState<'view' | 'edit'>('view');
-  const [draft, setDraft] = useState(() => docMarkdown(doc, stickers, tasks));
+  const [draft, setDraft] = useState(() => applyLinkedTasks(docMarkdown(doc, stickers, []), doc.links, tasks));
   const [draftTitle, setDraftTitle] = useState(path[path.length - 1] ?? doc.title);
   const [lightbox, setLightbox] = useState<BoardPhoto | null>(null);
   const [busy, setBusy] = useState(false);
   const areaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  const stored = docMarkdown(doc, stickers, tasks);
+  // What the note says once every LINKED line has taken its tick and day from
+  // its task. A line the user typed herself (no task) comes through untouched.
+  const stored = useMemo(
+    () => applyLinkedTasks(docMarkdown(doc, stickers, []), doc.links, tasks),
+    [doc, stickers, tasks],
+  );
 
   // Another device (or the migration) changed the note while we were looking.
   useEffect(() => {
@@ -69,8 +77,6 @@ export function PageView({ sphere, path, doc, photos, onRename, onDelete }: Prop
   const counts = useMemo(() => checkCounts(draft), [draft]);
   const lines = useMemo(() => checkLines(draft), [draft]);
   const pageTasks = useMemo(() => tasksOnPage(tasks, sphere, path), [tasks, sphere, path]);
-  const lined = useMemo(() => new Set(lines.map((line) => plain(line.text).toLowerCase())), [lines]);
-  const orphans = pageTasks.filter((task) => !lined.has(plain(task.title).toLowerCase()));
   const percent = counts.total ? Math.round((counts.done / counts.total) * 100) : 0;
 
   const save = (next: string) => {
@@ -80,47 +86,37 @@ export function PageView({ sphere, path, doc, photos, onRename, onDelete }: Prop
 
   const toggle = (index: number, done: boolean) => {
     const line = lines[index];
-    const next = setDone(draft, index, done);
-    save(next);
-    if (!line?.date) return;
-    const task = matchTask(pageTasks, line.text, line.date);
+    if (!line) return;
+    save(setDone(draft, index, done));
+    // A linked line drives its task; an unlinked one is just a note item.
+    const task = taskOfLine(doc.links, pageTasks, line.text);
     if (task) store.update(task.id, { completed: done, completedAt: done ? new Date().toISOString() : undefined });
   };
 
-  const plan = (index: number, date: string | null) => {
+  /** «→ задача»: open the item as a real task, in the calendar's own dialog, so
+   *  everything a task has is available — day picked in the calendar, note,
+   *  colour, repeat, backlog. The line stays in the note and follows the task. */
+  const openTask = (index: number) => {
     const line = lines[index];
     if (!line) return;
-    save(setDate(draft, index, date));
-    if (date) {
-      const existing = matchTask(pageTasks, line.text, date)
-        ?? matchTask(pageTasks, line.text);
-      if (existing) {
-        store.update(existing.id, {
-          startDate: date,
-          endDate: date,
-          unplanned: false,
-          completed: line.done,
-        });
-      } else {
-        const created = store.add({
-          title: plain(line.text) || 'новый пункт',
-          sphere,
-          topic: pathKey(path),
-          startDate: date,
-          endDate: date,
-          unplanned: false,
-        });
-        // `store.add` always starts a task open, so a line that is already
-        // ticked when it gets planned must be closed explicitly.
-        if (line.done) {
-          store.update(created.id, { completed: true, completedAt: new Date().toISOString() });
-        }
-      }
+    const linked = taskOfLine(doc.links, pageTasks, line.text);
+    if (linked) {
+      onEdit(linked);
       return;
     }
-    // Снять с плана: the task stays (it happened in the calendar), just unscheduled.
-    const task = line.date ? matchTask(pageTasks, line.text, line.date) : undefined;
-    if (task) store.update(task.id, { startDate: undefined, endDate: undefined, unplanned: true });
+    const made = store.add({
+      title: plain(line.text) || 'новый пункт',
+      sphere,
+      topic: pathKey(path),
+      startDate: line.date,
+      endDate: line.date,
+      unplanned: !line.date,
+    });
+    // `store.add` always starts a task open: a line ticked before it became a
+    // task must be closed explicitly.
+    if (line.done) store.update(made.id, { completed: true, completedAt: new Date().toISOString() });
+    saveBoardDoc(doc.id, { links: withLink(doc.links, made.id, line.text) });
+    onEdit(made);
   };
 
   const addItem = () => {
@@ -136,14 +132,6 @@ export function PageView({ sphere, path, doc, photos, onRename, onDelete }: Prop
       area.focus();
       area.setSelectionRange(next.length, next.length);
     }, 30);
-  };
-
-  const adoptOrphans = () => {
-    const extra = orphans
-      .map((task) => `- [${task.completed ? 'x' : ' '}] ${plain(task.title)}${task.startDate ? ` ^${task.startDate}` : ''}`)
-      .join('\n');
-    if (!extra) return;
-    save(`${draft.replace(/\s+$/, '')}\n\n${extra}\n`);
   };
 
   const wrap = (before: string, after: string, placeholder: string) => {
@@ -295,10 +283,7 @@ export function PageView({ sphere, path, doc, photos, onRename, onDelete }: Prop
               <div className="pg-bar" title={`${counts.done} из ${counts.total}`}>
                 <span style={{ width: `${percent}%` }} />
               </div>
-              <span className="pg-meta-text">
-                {counts.done}/{counts.total} сделано
-                {counts.planned ? ` · ${counts.planned} в плане` : ''}
-              </span>
+              <span className="pg-meta-text">{counts.done}/{counts.total} пунктов</span>
             </>
           ) : (
             <span className="pg-meta-text">пустая страница — начни с заголовка или пункта</span>
@@ -373,7 +358,7 @@ export function PageView({ sphere, path, doc, photos, onRename, onDelete }: Prop
             md={draft}
             photos={photos}
             onToggle={toggle}
-            onPlan={plan}
+            onOpenTask={openTask}
             onOpenImage={(src) => {
               const photo = photos.find((item) => item.id === src.replace('photo:', ''));
               if (photo) setLightbox(photo);
@@ -394,11 +379,7 @@ export function PageView({ sphere, path, doc, photos, onRename, onDelete }: Prop
           />
           <div className="pg-foot">
             <button type="button" className="pg-add-line" onClick={addItem}>＋ пункт</button>
-            {orphans.length > 0 && (
-              <button type="button" className="pg-adopt" onClick={adoptOrphans}>
-                {orphans.length === 1 ? 'в заметке нет 1 задачи — добавить пунктом' : `в заметке нет ${orphans.length} задач — добавить пунктами`}
-              </button>
-            )}
+            <span className="pg-foot-hint">у пункта «→ задача» открывает задачу со всеми её полями</span>
           </div>
         </>
       )}

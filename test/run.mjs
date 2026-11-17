@@ -87,20 +87,26 @@ check('server rows', names(), ['Дом', 'Служба']);
 await mod.pullFromServer();
 check('local after pull', spheres().sort(), ['Дом', 'Служба']);
 
-console.log('\n6. sub-categories rebuilt from tasks after the tab list is lost');
+console.log('\n6. the dashboard tree is never derived from tasks');
 store.addSphere('Автоматизация');
 await settle();
 store.add({ title: 'Домашний сервер', sphere: 'Автоматизация', topic: 'Здоровье', unplanned: true });
 await settle();
-check('tab list rebuilt from the task itself', store.getTopics()['Автоматизация'], ['Здоровье']);
-// Same rule must hold for rows that arrive from the server only (a fresh
-// device, or a device whose #topics: segment was wiped): fetch and check.
+// History: a task whose `topic` had no tab used to create a folder, which put
+// surprise folders/pages next to the real ones on the dashboard. The tree is
+// now exactly what the user made.
+check('a task topic makes no folder', store.getTopics()['Автоматизация'], []);
 await mod.pullFromServer();
-check('tab survives a pull', store.getTopics()['Автоматизация'], ['Здоровье']);
-// Deleting the topic clears it on the tasks, so it must NOT come back.
+check('a pull makes no folder either', store.getTopics()['Автоматизация'], []);
+// A folder the user creates is kept across a pull, and deleting it stays deleted.
+store.addTopic('Автоматизация', 'Здоровье');
+await settle();
+check('user folder appears', store.getTopics()['Автоматизация'], ['Здоровье']);
+await mod.pullFromServer();
+check('user folder survives a pull', store.getTopics()['Автоматизация'], ['Здоровье']);
 store.removeTopic('Автоматизация', 'Здоровье');
 await settle();
-check('deleted topic stays gone', store.getTopics()['Автоматизация'], []);
+check('deleted folder stays gone', store.getTopics()['Автоматизация'], []);
 check('its tasks moved to Основное',
   store.getTasks().filter((t) => t.sphere === 'Автоматизация').map((t) => t.topic ?? 'Основное'),
   ['Основное']);

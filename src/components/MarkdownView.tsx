@@ -1,18 +1,17 @@
 // Renders the note's Markdown. Nothing here is editable except the two things
 // that make a note a working tool: the checkbox of a checklist line, and the day
 // a line is planned for.
-import { useState } from 'react';
 import type { ReactNode } from 'react';
 import type { BoardPhoto } from '../lib/board';
 import { humanDate } from '../lib/doc';
-import { isoDay, parseBlocks } from '../lib/md';
+import { parseBlocks } from '../lib/md';
 import type { Block } from '../lib/md';
 
 interface Props {
   md: string;
   photos?: BoardPhoto[];
   onToggle?: (index: number, done: boolean) => void;
-  onPlan?: (index: number, date: string | null) => void;
+  onOpenTask?: (index: number) => void;
   onOpenImage?: (src: string) => void;
   /** Rendered while the note is still empty. */
   empty?: ReactNode;
@@ -97,38 +96,18 @@ function DateChip({ date, onClear }: { date: string; onClear?: () => void }) {
   );
 }
 
-function PlanButton({ date, onPlan }: { date?: string; onPlan?: (date: string | null) => void }) {
-  const [open, setOpen] = useState(false);
-  if (!onPlan) return date ? <DateChip date={date} /> : null;
+function PlanButton({ date, onOpen }: { date?: string; onOpen?: () => void }) {
+  if (!onOpen) return date ? <DateChip date={date} /> : null;
   return (
     <span className="md-plan">
       <button
         type="button"
         className={`md-plan-btn${date ? ' is-set' : ''}`}
-        onClick={() => setOpen((value) => !value)}
-        title={date ? `${humanDate(date)} — изменить день` : 'запланировать на день'}
+        onClick={onOpen}
+        title={date ? `${humanDate(date)} — открыть задачу` : 'открыть как задачу: день, заметка, цвет, повтор'}
       >
-        {date ? humanDate(date) : '＋ день'}
+        {date ? humanDate(date) : '→ задача'}
       </button>
-      {date && (
-        <button type="button" className="md-date-x" onClick={() => onPlan(null)} title="снять с плана">×</button>
-      )}
-      {open && (
-        <span className="md-plan-pop">
-          <input
-            type="date"
-            autoFocus
-            defaultValue={date ?? isoDay(new Date())}
-            onChange={(event) => {
-              onPlan(event.target.value || null);
-              setOpen(false);
-            }}
-          />
-          {date && (
-            <button type="button" onClick={() => { onPlan(null); setOpen(false); }}>снять</button>
-          )}
-        </span>
-      )}
     </span>
   );
 }
@@ -137,13 +116,13 @@ function BlockView({
   block,
   photos,
   onToggle,
-  onPlan,
+  onOpenTask,
   onOpenImage,
 }: {
   block: Block;
   photos: BoardPhoto[];
   onToggle?: (index: number, done: boolean) => void;
-  onPlan?: (index: number, date: string | null) => void;
+  onOpenTask?: (index: number) => void;
   onOpenImage?: (src: string) => void;
 }) {
   switch (block.type) {
@@ -186,7 +165,7 @@ function BlockView({
                 {item.done ? '✓' : ''}
               </button>
               <span className="md-check-text">{inline(item.text, photos, onOpenImage)}</span>
-              <PlanButton date={item.date} onPlan={(date) => onPlan?.(item.index, date)} />
+              <PlanButton date={item.date} onOpen={() => onOpenTask?.(item.index)} />
             </div>
           ))}
         </div>
@@ -211,7 +190,7 @@ function BlockView({
   }
 }
 
-export function MarkdownView({ md, photos = [], onToggle, onPlan, onOpenImage, empty }: Props) {
+export function MarkdownView({ md, photos = [], onToggle, onOpenTask, onOpenImage, empty }: Props) {
   const blocks = parseBlocks(md);
   if (!blocks.length) return <div className="md md-empty">{empty}</div>;
   return (
@@ -222,7 +201,7 @@ export function MarkdownView({ md, photos = [], onToggle, onPlan, onOpenImage, e
           block={block}
           photos={photos}
           onToggle={onToggle}
-          onPlan={onPlan}
+          onOpenTask={onOpenTask}
           onOpenImage={onOpenImage}
         />
       ))}

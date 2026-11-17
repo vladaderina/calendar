@@ -86,6 +86,10 @@ export interface BoardDoc {
   /** LEGACY: the line/checkbox blocks of the old editor. Read once by
    *  `lib/doc.ts` to build `md`, never written again. */
   blocks: DocBlock[];
+  /** Checklist line → task it stands for: `{ [taskId]: normalized line text }`.
+   *  Written when an item is opened as a task, so the line follows the task even
+   *  after its title or day is changed in the calendar dialog. */
+  links?: Record<string, string>;
   nodeKey: string;
   born: number;
   t: number;
@@ -409,7 +413,10 @@ function persistSoon(): void {
   }, 600);
 }
 
-export function saveBoardDoc(id: string, patch: { title?: string; md?: string; blocks?: DocBlock[] }): void {
+export function saveBoardDoc(
+  id: string,
+  patch: { title?: string; md?: string; blocks?: DocBlock[]; links?: Record<string, string> },
+): void {
   const cur = items[id];
   if (!cur || cur.kind !== 'doc' || cur.deleted) return;
   items[id] = {
@@ -417,6 +424,7 @@ export function saveBoardDoc(id: string, patch: { title?: string; md?: string; b
     title: patch.title !== undefined ? patch.title : cur.title,
     md: patch.md !== undefined ? patch.md : cur.md,
     blocks: patch.blocks ?? cur.blocks,
+    links: patch.links !== undefined ? patch.links : cur.links,
     t: Date.now(),
   };
   persistSoon();

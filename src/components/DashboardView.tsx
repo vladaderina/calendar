@@ -30,9 +30,9 @@ import {
   type BoardDoc,
   type BoardPhoto,
 } from '../lib/board';
-import { docMarkdown } from '../lib/doc';
-import { checkCounts, isoDay } from '../lib/md';
-import { adoptContainerTasks, upgradeDashboardModel } from '../lib/migrate';
+import { applyLinkedTasks, docMarkdown } from '../lib/doc';
+import { checkCounts } from '../lib/md';
+import { upgradeDashboardModel } from '../lib/migrate';
 import { PageView } from './PageView';
 
 interface Props {
@@ -60,11 +60,6 @@ function greeting(): string {
   return 'добрый вечер';
 }
 
-function shift(iso: string, days: number): string {
-  const [y, m, d] = iso.split('-').map(Number);
-  return isoDay(new Date(y, m - 1, d + days));
-}
-
 interface Stats {
   done: number;
   total: number;
@@ -84,14 +79,34 @@ function InlineInput({
   onCancel: () => void;
 }) {
   const [value, setValue] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  // The field is created by a click on the «＋ папка» / «＋ страница» button. The
+  // browser finishes that click AFTER React mounted the input and focused it, so
+  // a blur arrives immediately with an empty value — treating it as «cancel»
+  // made the field vanish before anything could be typed (a folder «appeared»
+  // only after a reload, or not at all). Ignore blur for the first moments and
+  // put the caret back.
+  const settled = useRef(false);
+  useEffect(() => {
+    const id = window.setTimeout(() => { settled.current = true; }, 350);
+    return () => window.clearTimeout(id);
+  }, []);
   return (
     <input
+      ref={inputRef}
       className="dsh-new-input"
       autoFocus
       value={value}
       placeholder={placeholder}
       onChange={(event) => setValue(event.target.value)}
-      onBlur={() => (value.trim() ? onSubmit(value) : onCancel())}
+      onBlur={() => {
+        if (!settled.current) {
+          inputRef.current?.focus();
+          return;
+        }
+        if (value.trim()) onSubmit(value);
+        else onCancel();
+      }}
       onKeyDown={(event) => {
         if (event.key === 'Enter') {
           event.preventDefault();
@@ -183,7 +198,7 @@ export function DashboardView({ onEdit }: Props) {
   const statsUnder = useMemo(() => {
     const byKey = new Map<string, Stats>();
     for (const doc of docs) {
-      const counts = checkCounts(docMarkdown(doc, notes, tasks));
+      const counts = checkCounts(applyLinkedTasks(docMarkdown(doc, notes, []), doc.links, tasks));
       const parts = doc.nodeKey.split(SEP);
       const sphere = parts[0];
       const names = keyPath(parts.slice(1).join(SEP));
@@ -220,13 +235,6 @@ export function DashboardView({ onEdit }: Props) {
     return map;
   }, [photos]);
 
-  const today = isoDay(new Date());
-  const todayTasks = useMemo(() => tasks
-    .filter((task) => !task.completed && task.startDate === today), [tasks, today]);
-  const overdueTasks = useMemo(() => tasks
-    .filter((task) => !task.completed && !!task.startDate && task.startDate < today), [tasks, today]);
-  const weekTasks = useMemo(() => tasks
-    .filter((task) => !task.completed && !!task.startDate && task.startDate > today && task.startDate <= shift(today, 7)), [tasks, today]);
 
   const allPages = useMemo(() => {
     const out: { sphere: string; path: string[]; node: TreeNode }[] = [];
@@ -251,7 +259,7 @@ export function DashboardView({ onEdit }: Props) {
         for (const node of nodes) {
           const path = [...prefix, node.name];
           const doc = docByKey.get(nodeKeyOf(sphere, path));
-          const inText = doc ? docMarkdown(doc, notes, tasks).toLowerCase().includes(q) : false;
+          const inText = doc ? docMarkdown(doc, notes, []).toLowerCase().includes(q) : false;
           if (node.name.toLowerCase().includes(q) || inText) {
             rows.push({ sphere, path, label: node.name, kind: node.kind === 'note' ? 'page' : 'folder' });
           }
@@ -365,35 +373,9 @@ export function DashboardView({ onEdit }: Props) {
 
   const pagePhotos = photos.filter((photo) => photo.nodeKey === nodeKeyOf(sel.sphere, sel.path));
 
-  // Tasks filed to the container itself (a page was deleted, or the task was
-  // made elsewhere): they live in the calendar but are not on any page yet.
-  const unfiled = sel.sphere
-    ? tasks.filter((task) => task.sphere === sel.sphere && (task.topic ?? '') === pathKey(sel.path))
-    : [];
-
-  const unfiledBanner = unfiled.length > 0 && (
-    <div className="dsh-unfiled">
-      <span className="dsh-unfiled-text">
-        {unfiled.length === 1 ? '1 задача вне страниц' : `${unfiled.length} задач вне страниц`}
-        {' — '}они в календаре, но не в заметке
-      </span>
-      <button
-        type="button"
-        className="dsh-unfiled-btn"
-        onClick={() => {
-          adoptContainerTasks(sel.sphere, sel.path);
-          setToast('собрал задачи в страницу');
-        }}
-      >
-        собрать в страницу
-      </button>
-    </div>
-  );
-
   const renderRow = (sphere: string, node: TreeNode, path: string[], depth: number): ReactNode => {
     const key = `${sphere}${SEP}${pathKey(path)}`;
     const isOpen = expanded.includes(key);
-    const stats = statsOf(sphere, path);
     const cover = coverOf.get(key);
     const active = sel.sphere === sphere && pathKey(sel.path) === pathKey(path);
     const isPage = node.kind === 'note';
@@ -417,7 +399,7 @@ export function DashboardView({ onEdit }: Props) {
           {isPage && (
             cover?.data
               ? <span className="dsh-row-thumb" style={{ backgroundImage: `url(${cover.data})` }} />
-              : <span className="dsh-row-thumb is-empty">{stats.total ? `${stats.done}/${stats.total}` : '▤'}</span>
+              : <span className="dsh-row-thumb is-empty">▤</span>
           )}
           <button
             type="button"
@@ -426,7 +408,6 @@ export function DashboardView({ onEdit }: Props) {
           >
             {node.name}
           </button>
-          {!isPage && stats.total > 0 && <span className="dsh-row-count">{stats.done}/{stats.total}</span>}
         </div>
         {!isPage && isOpen && (
           <div className="dsh-children">
@@ -538,7 +519,6 @@ export function DashboardView({ onEdit }: Props) {
     ? nodeAt(tree[sel.sphere]?.children ?? [], sel.path)?.children ?? []
     : tree[sel.sphere]?.children ?? [];
 
-  const stats = statsOf(sel.sphere, sel.path);
   const cover = sel.sphere ? coverOf.get(nodeKeyOf(sel.sphere, sel.path)) : undefined;
   const creatingHere = creating && creating.sphere === sel.sphere
     && pathKey(creating.parent) === pathKey(sel.path)
@@ -635,31 +615,6 @@ export function DashboardView({ onEdit }: Props) {
               <h1 className="dsh-home-title">{greeting()}</h1>
             </header>
 
-            <div className="dsh-stats">
-              <div className="dsh-stat"><b>{todayTasks.length}</b><span>в плане сегодня</span></div>
-              <div className="dsh-stat"><b>{weekTasks.length}</b><span>на неделю вперёд</span></div>
-              <div className="dsh-stat"><b>{overdueTasks.length}</b><span>просрочено</span></div>
-            </div>
-
-            <section className="dsh-panel">
-              <div className="dsh-panel-head">
-                <h2>сегодня</h2>
-                <span className="dsh-muted">{todayTasks.length ? 'отмечай по ходу дня' : 'ничего не запланировано'}</span>
-              </div>
-              {todayTasks.length > 0 && (
-                <div className="dsh-today-list">
-                  {todayTasks.slice(0, 8).map((task) => (
-                    <div key={task.id} className="dsh-today-row">
-                      <button type="button" className="dsh-check" onClick={() => store.toggleComplete(task.id)} aria-label="выполнено" />
-                      <button type="button" className="dsh-today-name" onClick={() => onEdit(task)}>{task.title}</button>
-                      {task.sphere && <span className="dsh-chip">{task.sphere}</span>}
-                    </div>
-                  ))}
-                  {todayTasks.length > 8 && <p className="dsh-muted">и ещё {todayTasks.length - 8}…</p>}
-                </div>
-              )}
-            </section>
-
             {recent.length > 0 && (
               <section className="dsh-panel">
                 <div className="dsh-panel-head"><h2>продолжить</h2></div>
@@ -697,10 +652,8 @@ export function DashboardView({ onEdit }: Props) {
                       <span className="dsh-card-body">
                         <span className="dsh-card-name">{sphere}</span>
                         <span className="dsh-card-meta">
-                          {st.pages ? `${st.pages} стр.` : 'пусто'}
-                          {st.total ? ` · ${st.done}/${st.total}` : ''}
+                          {st.pages ? `${st.pages} ${st.pages === 1 ? 'страница' : st.pages < 5 ? 'страницы' : 'страниц'}` : 'пусто'}
                         </span>
-                        <Progress stats={st} />
                       </span>
                     </button>
                   );
@@ -741,12 +694,6 @@ export function DashboardView({ onEdit }: Props) {
                   onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
                   aria-label="название сферы"
                 />
-                <div className="dsh-sec-meta">
-                  <Progress stats={stats} />
-                  {stats.total > 0 && (
-                    <span>{stats.done} из {stats.total} пунктов · {stats.planned} в плане</span>
-                  )}
-                </div>
               </div>
             </header>
 
@@ -770,8 +717,6 @@ export function DashboardView({ onEdit }: Props) {
               )}
             </div>
 
-            {unfiledBanner}
-
             <ContainerList
               {...listCommon}
               items={containerChildren}
@@ -793,8 +738,32 @@ export function DashboardView({ onEdit }: Props) {
             </nav>
 
             <header className="dsh-folder-head">
-              <h1 className="dsh-folder-title">{sel.path[sel.path.length - 1]}</h1>
-              <Progress stats={stats} />
+              <input
+                className="dsh-folder-title"
+                key={pathKey(sel.path)}
+                defaultValue={sel.path[sel.path.length - 1]}
+                onBlur={(event) => {
+                  const next = event.target.value.trim();
+                  const current = sel.path[sel.path.length - 1];
+                  if (!next || next === current) {
+                    event.target.value = current;
+                    return;
+                  }
+                  store.renameTopic(sel.sphere, sel.path, next);
+                  rekeyNode(nodeKeyOf(sel.sphere, sel.path), nodeKeyOf(sel.sphere, [...sel.path.slice(0, -1), next]));
+                  const path = [...sel.path.slice(0, -1), next];
+                  setSel({ sphere: sel.sphere, path });
+                  setToast('папка переименована');
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.currentTarget.blur();
+                  if (event.key === 'Escape') {
+                    event.currentTarget.value = sel.path[sel.path.length - 1];
+                    event.currentTarget.blur();
+                  }
+                }}
+                aria-label="название папки"
+              />
             </header>
 
             <div className="dsh-sec-actions">
@@ -804,7 +773,11 @@ export function DashboardView({ onEdit }: Props) {
                 </button>
               )}
               {canAddChild(sel.path) && (
-                <button type="button" className="dsh-cta is-quiet" onClick={() => setCreating({ sphere: sel.sphere, parent: sel.path, kind: 'folder' })}>
+                <button
+                  type="button"
+                  className="dsh-cta is-quiet"
+                  onClick={() => setCreating({ sphere: sel.sphere, parent: sel.path, kind: 'folder' })}
+                >
                   ＋ папка
                 </button>
               )}
@@ -820,8 +793,6 @@ export function DashboardView({ onEdit }: Props) {
                 <button type="button" className="dsh-ghost" onClick={() => setConfirmKey(`node:${pathKey(sel.path)}`)}>удалить</button>
               )}
             </div>
-
-            {unfiledBanner}
 
             <ContainerList
               {...listCommon}
@@ -861,6 +832,7 @@ export function DashboardView({ onEdit }: Props) {
               doc={pageDoc}
               photos={pagePhotos}
               onRename={(name) => renameNode(sel.sphere, sel.path, name)}
+              onEdit={onEdit}
               onDelete={() => {
                 if (!pageConfirm) {
                   setPageConfirm(true);
