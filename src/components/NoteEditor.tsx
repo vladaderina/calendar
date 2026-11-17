@@ -98,7 +98,7 @@ export function NoteEditor({ doc, sphere, topic, onTitleChange }: Props) {
       return;
     }
     const task = store.add({
-      title: row.text.trim() || 'пункт из заметки',
+      title: row.text.trim() || 'пункт со страницы',
       startDate: date,
       endDate: date,
       sphere,
@@ -160,7 +160,7 @@ export function NoteEditor({ doc, sphere, topic, onTitleChange }: Props) {
       <input
         className="note-title"
         value={title}
-        placeholder="название заметки"
+        placeholder="название страницы"
         onChange={(event) => setTitle(event.target.value)}
         onBlur={() => {
           const value = title.trim();

@@ -958,13 +958,24 @@ export function DashboardView({ onEdit }: Props) {
                     <>
                       <button type="button" className="dash-danger" onClick={deleteSelected}>
                         {sel.path.length
-                          ? (isNote ? 'удалить заметку' : 'удалить папку')
+                          ? (isNote ? 'удалить страницу' : 'удалить папку')
                           : 'удалить категорию'}
                       </button>
-                      <button type="button" className="dash-muted" onClick={() => setConfirmDelete(false)}>отмена</button>
+                      <button type="button" className="dash-cancel" onClick={() => setConfirmDelete(false)}>отмена</button>
                     </>
                   ) : (
-                    <button type="button" className="dash-muted" onClick={() => setConfirmDelete(true)}>удалить</button>
+                    <button
+                      type="button"
+                      className="dash-delete"
+                      onClick={() => setConfirmDelete(true)}
+                      title="Удалить"
+                      aria-label="Удалить"
+                    >
+                      <svg width="11" height="12" viewBox="0 0 12 13" aria-hidden>
+                        <path d="M1.5 3.2h9M4.2 3.2V1.6h3.6v1.6M2.9 3.2l.7 8.2h4.8l.7-8.2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      удалить
+                    </button>
                   )}
                 </div>
               </>
@@ -988,7 +999,7 @@ export function DashboardView({ onEdit }: Props) {
                 </>
               ) : (
                 <div className="dash-hint-line">
-                  эта заметка не найдена — возможно, её удалили на другом устройстве
+                  эта страница не найдена — возможно, её удалили на другом устройстве
                 </div>
               )
             ) : (
