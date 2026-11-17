@@ -8,7 +8,8 @@ import {
   BLOCK_HINT,
   BLOCK_LABEL,
   canAddChild,
-  canAddNote,
+  canAddPage,
+  canHoldPages,
   inSubtree,
   keyPath,
   nodeAt,
@@ -36,6 +37,7 @@ import {
 } from '../lib/board';
 import { NoteEditor } from './NoteEditor';
 import { fileToDataUrl } from '../lib/image';
+import { migrateBlocksToPages } from '../lib/migrate';
 
 interface Props {
   onEdit: (task: Task) => void;
@@ -225,6 +227,12 @@ export function DashboardView({ onEdit }: Props) {
     claimOrphans(nodeKeyOf(spheres[0], []));
   }, [spheres]);
 
+  // Old categories/folders kept blocks of their own; containers hold nothing
+  // now, so those blocks move into a «страница» child exactly once.
+  useEffect(() => {
+    migrateBlocksToPages();
+  }, []);
+
   // Keep the selection valid when categories/folders vanish (deleted here or
   // on the other device).
   useEffect(() => {
@@ -261,11 +269,8 @@ export function DashboardView({ onEdit }: Props) {
   const current: TreeNode | null = sel.path.length ? nodeAt(category?.children ?? [], sel.path) : null;
   const isNote = current?.kind === 'note';
   const noteDoc = isNote ? docs.find((item) => item.id === current?.noteId) ?? null : null;
-  const blocks: BlockKind[] = isNote
-    ? []
-    : sel.path.length
-      ? (current?.blocks ?? [])
-      : (category?.blocks ?? ['tasks']);
+  // Blocks live ONLY on a page (a category or a folder writes nothing).
+  const blocks: BlockKind[] = isNote ? (current?.blocks ?? []) : [];
   const nodeKey = nodeKeyOf(sel.sphere, sel.path);
   const topicKey = sel.path.length ? pathKey(sel.path) : undefined;
 
@@ -281,7 +286,8 @@ export function DashboardView({ onEdit }: Props) {
   );
 
   const canNest = (path: string[]) => canAddChild(path);
-  const canNote = (path: string[]) => canAddNote(path);
+  // A category holds folders only; pages appear from the first folder down.
+  const canPage = (path: string[]) => canHoldPages(path) && canAddPage(path);
 
   const select = (sphere: string, path: string[]) => {
     setSel({ sphere, path });
@@ -300,7 +306,7 @@ export function DashboardView({ onEdit }: Props) {
   const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
 
   const startAdd = (sphere: string, parentPath: string[], kind: 'folder' | 'note' = 'folder') => {
-    if (kind === 'note' ? !canNote(parentPath) : !canAddChild(parentPath)) return;
+    if (kind === 'note' ? !canPage(parentPath) : !canAddChild(parentPath)) return;
     setAdding({ sphere, path: parentPath, kind });
     setDraftName('');
     setExpanded((prev) => {
@@ -441,7 +447,16 @@ export function DashboardView({ onEdit }: Props) {
     return true;
   };
 
-  const rowDragProps = (payload: { kind: 'category' | 'folder'; id: string; name: string; sphere: string; parentPath: string[] }) => ({
+  /** `acceptTask` is true only on a page: tasks are filed to pages now, so a
+   *  category or folder must not swallow a dragged task. */
+  const rowDragProps = (payload: {
+    kind: 'category' | 'folder';
+    id: string;
+    name: string;
+    sphere: string;
+    parentPath: string[];
+    acceptTask?: boolean;
+  }) => ({
     draggable: true,
     onDragStart: (event: DragEvent) => {
       dragRef.current = payload;
@@ -454,6 +469,7 @@ export function DashboardView({ onEdit }: Props) {
     },
     onDragOver: (event: DragEvent) => {
       if (event.dataTransfer.types.includes('text/task-id')) {
+        if (!payload.acceptTask) return;
         event.preventDefault();
         event.stopPropagation();
         event.dataTransfer.dropEffect = 'move';
@@ -483,7 +499,7 @@ export function DashboardView({ onEdit }: Props) {
       event.stopPropagation();
       // The path is built from NAMES (tasks reference names), never from ids.
       const path = payload.kind === 'category' ? [] : [...payload.parentPath, payload.name];
-      if (dropTask(event, payload.sphere, path)) {
+      if (payload.acceptTask && dropTask(event, payload.sphere, path)) {
         setOverNode(null);
         return;
       }
@@ -527,7 +543,14 @@ export function DashboardView({ onEdit }: Props) {
               ].join(' ')}
               style={{ paddingLeft: 4 + depth * 10 }}
               onClick={() => select(sphere, path)}
-              {...rowDragProps({ kind: 'folder', id: node.id, name: node.name, sphere, parentPath })}
+              {...rowDragProps({
+              kind: 'folder',
+              id: node.id,
+              name: node.name,
+              sphere,
+              parentPath,
+              acceptTask: note,
+            })}
             >
               {note ? (
                 <span className="dash-note-glyph" aria-hidden>
@@ -536,6 +559,9 @@ export function DashboardView({ onEdit }: Props) {
                     <path d="M6.5 1.5v3h3" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
                   </svg>
                 </span>
+              ) : node.children.length === 0 ? (
+                // No children yet → no arrow at all (the user's rule).
+                <span className="dash-chev-empty" aria-hidden />
               ) : (
                 <button
                   type="button"
@@ -587,248 +613,7 @@ export function DashboardView({ onEdit }: Props) {
   const missing = blockKinds.filter((kind) => !blocks.includes(kind));
   const photo = (value: string | null) => nodePhotos.find((item) => item.id === value);
 
-  return (
-    <div className="dashboard">
-      <aside className="dash-rail" aria-label="Категории и папки">
-        <div className="dash-rail-head">
-          <span>категории</span>
-          <button type="button" className="dash-rail-add" onClick={() => setCreatingCategory(true)} aria-label="Новая категория" title="Новая категория">+</button>
-        </div>
-
-        <div className="dash-rail-list">
-          {spheres.map((sphere) => {
-            const open = !!expanded[nodeKeyOf(sphere, [])];
-            const active = sel.sphere === sphere && !sel.path.length;
-            const count = counts.bySphere[sphere] ?? 0;
-            return (
-              <div className="dash-node" key={sphere}>
-                <div
-                  className={[
-                    'dash-node-row',
-                    active ? 'active' : '',
-                    overNode === sphere ? 'drop' : '',
-                  ].join(' ')}
-                  onClick={() => select(sphere, [])}
-                  {...rowDragProps({ kind: 'category', id: sphere, name: sphere, sphere, parentPath: [] })}
-                >
-                  <button
-                    type="button"
-                    className={`dash-chev ${open ? 'open' : ''}`}
-                    onClick={(event) => { event.stopPropagation(); toggle(nodeKeyOf(sphere, [])); }}
-                    aria-label={open ? 'Свернуть папки' : 'Показать папки'}
-                    title={open ? 'Свернуть' : 'Папки'}
-                  >
-                    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-                      <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </button>
-                  <span className="dash-node-name">{sphere}</span>
-                  {count > 0 && <span className="dash-node-count">{count}</span>}
-                  {canNest([]) && (
-                    <button
-                      type="button"
-                      className="dash-node-plus"
-                      onClick={(event) => { event.stopPropagation(); startAdd(sphere, []); }}
-                      aria-label="Папка в категории"
-                      title="Папка в категории"
-                    >+</button>
-                  )}
-                </div>
-                {open && renderFolders(sphere, tree[sphere]?.children ?? [], [], 1)}
-                {open && adding && adding.sphere === sphere && !adding.path.length && (
-                  <input
-                    autoFocus
-                    className="dash-sub-input"
-                    value={draftName}
-                    placeholder="папка"
-                    onChange={(event) => setDraftName(event.target.value)}
-                    onBlur={commitAdd}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') commitAdd();
-                      if (event.key === 'Escape') { setAdding(null); setDraftName(''); }
-                    }}
-                  />
-                )}
-              </div>
-            );
-          })}
-
-          {creatingCategory && (
-            <input
-              autoFocus
-              className="dash-rail-input"
-              value={newCategory}
-              placeholder="категория"
-              onChange={(event) => setNewCategory(event.target.value)}
-              onBlur={commitCategory}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') commitCategory();
-                if (event.key === 'Escape') { setNewCategory(''); setCreatingCategory(false); }
-              }}
-            />
-          )}
-
-          {!spheres.length && !creatingCategory && (
-            <button type="button" className="dash-rail-empty" onClick={() => setCreatingCategory(true)}>
-              пока пусто — создай первую категорию
-            </button>
-          )}
-        </div>
-
-        <div className="dash-rail-hint">
-          категория → папка → папка. заметку можно положить в любую папку,
-          а её пункты — поставить в план на конкретный день.
-        </div>
-      </aside>
-
-      <div className="dash-main">
-        <section className="dash-page">
-          <header className="dash-page-head">
-            {sel.sphere ? (
-              <>
-                <div className="dash-crumbs">
-                  {renaming ? (
-                    <input
-                      autoFocus
-                      className="dash-rename"
-                      defaultValue={sel.path.length ? sel.path[sel.path.length - 1] : sel.sphere}
-                      onBlur={(event) => commitRename(event.currentTarget.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') event.currentTarget.blur();
-                        if (event.key === 'Escape') {
-                          event.currentTarget.value = sel.path.length ? sel.path[sel.path.length - 1] : sel.sphere;
-                          event.currentTarget.blur();
-                        }
-                      }}
-                    />
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        className="dash-crumb"
-                        onClick={() => (sel.path.length ? select(sel.sphere, []) : setRenaming(true))}
-                        title={sel.path.length ? 'К категории' : 'Переименовать категорию'}
-                      >
-                        {sel.sphere}
-                      </button>
-                      {sel.path.map((name, at) => {
-                        const path = sel.path.slice(0, at + 1);
-                        const last = at === sel.path.length - 1;
-                        return (
-                          <span className="dash-crumb-group" key={`${name}-${at}`}>
-                            <span className="dash-crumb-sep">/</span>
-                            <button
-                              type="button"
-                              className={`dash-crumb ${last ? 'last' : ''}`}
-                              onClick={() => (last ? setRenaming(true) : select(sel.sphere, path))}
-                              title={last ? 'Переименовать' : 'К этой папке'}
-                            >
-                              {name}
-                            </button>
-                          </span>
-                        );
-                      })}
-                    </>
-                  )}
-                </div>
-
-                {!isNote && <span className="dash-page-count">{list.length}</span>}
-
-                <div className="dash-page-actions">
-                  {!isNote && missing.length > 0 && (
-                    <div className="dash-add-wrap">
-                      <button
-                        type="button"
-                        className="dash-add-block"
-                        onClick={() => setPaletteOpen((prev) => !prev)}
-                        aria-expanded={paletteOpen}
-                      >
-                        + блок
-                      </button>
-                      {paletteOpen && (
-                        <>
-                          <div className="dash-palette-backdrop" onClick={() => setPaletteOpen(false)} />
-                          <div className="dash-palette" role="menu">
-                            {missing.map((kind) => (
-                              <button
-                                key={kind}
-                                type="button"
-                                className="dash-palette-item"
-                                role="menuitem"
-                                onClick={() => addBlock(kind)}
-                              >
-                                <span className="dash-palette-name">{BLOCK_LABEL[kind]}</span>
-                                <span className="dash-palette-hint">{BLOCK_HINT[kind]}</span>
-                              </button>
-                            ))}
-                            {canNest(sel.path) && (
-                              <button
-                                type="button"
-                                className="dash-palette-item"
-                                role="menuitem"
-                                onClick={() => { setPaletteOpen(false); startAdd(sel.sphere, sel.path); }}
-                              >
-                                <span className="dash-palette-name">папка</span>
-                                <span className="dash-palette-hint">вложенная папка внутри этой</span>
-                              </button>
-                            )}
-                            {canNote(sel.path) && (
-                              <button
-                                type="button"
-                                className="dash-palette-item"
-                                role="menuitem"
-                                onClick={() => { setPaletteOpen(false); startAdd(sel.sphere, sel.path, 'note'); }}
-                              >
-                                <span className="dash-palette-name">заметка</span>
-                                <span className="dash-palette-hint">файл с чеклистом внутри этой</span>
-                              </button>
-                            )}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )}
-                  {!isNote && canNest(sel.path) && (
-                    <button type="button" className="dash-muted" onClick={() => startAdd(sel.sphere, sel.path)}>+ папка</button>
-                  )}
-                  {!isNote && canNote(sel.path) && (
-                    <button type="button" className="dash-muted" onClick={() => startAdd(sel.sphere, sel.path, 'note')}>+ заметка</button>
-                  )}
-                  {confirmDelete ? (
-                    <>
-                      <button type="button" className="dash-danger" onClick={deleteSelected}>
-                        {sel.path.length
-                          ? (isNote ? 'удалить заметку' : 'удалить папку')
-                          : 'удалить категорию'}
-                      </button>
-                      <button type="button" className="dash-muted" onClick={() => setConfirmDelete(false)}>отмена</button>
-                    </>
-                  ) : (
-                    <button type="button" className="dash-muted" onClick={() => setConfirmDelete(true)}>удалить</button>
-                  )}
-                </div>
-              </>
-            ) : (
-              <span className="dash-panel-title">дашборд</span>
-            )}
-          </header>
-
-          {sel.sphere ? (
-            isNote ? (
-              noteDoc ? (
-                <NoteEditor
-                  key={noteDoc.id}
-                  doc={noteDoc}
-                  sphere={sel.sphere}
-                  topic={sel.path.length > 1 ? pathKey(sel.path.slice(0, -1)) : undefined}
-                  onTitleChange={commitRename}
-                />
-              ) : (
-                <div className="dash-hint-line">
-                  эта заметка не найдена — возможно, её удалили на другом устройстве
-                </div>
-              )
-            ) : (
+  const renderBlocks = () => (
             <div className="dash-blocks">
               {blocks.map((kind) => {
                 if (kind === 'tasks') {
@@ -957,7 +742,7 @@ export function DashboardView({ onEdit }: Props) {
                 <div className="dash-empty">
                   <div className="dash-empty-title">пока здесь пусто</div>
                   <div className="dash-empty-text">
-                    добавь блок — задачи, заметки или мудборд — или вложенную папку.
+                    страница пустая — добавь блок: задачи, стикеры или мудборд.
                   </div>
                   <div className="dash-empty-actions">
                     {blockKinds.map((kind) => (
@@ -966,22 +751,286 @@ export function DashboardView({ onEdit }: Props) {
                         <span className="dash-empty-hint">{BLOCK_HINT[kind]}</span>
                       </button>
                     ))}
-                    {canNest(sel.path) && (
-                      <button type="button" className="dash-empty-btn" onClick={() => startAdd(sel.sphere, sel.path)}>
-                        <span className="dash-empty-name">папка</span>
-                        <span className="dash-empty-hint">вложенная папка внутри этой</span>
-                      </button>
-                    )}
-                    {canNote(sel.path) && (
-                      <button type="button" className="dash-empty-btn" onClick={() => startAdd(sel.sphere, sel.path, 'note')}>
-                        <span className="dash-empty-name">заметка</span>
-                        <span className="dash-empty-hint">файл с чеклистом внутри этой</span>
-                      </button>
-                    )}
+
                   </div>
                 </div>
               )}
             </div>
+  );
+
+  return (
+    <div className="dashboard">
+      <aside className="dash-rail" aria-label="Категории и папки">
+        <div className="dash-rail-head">
+          <span>категории</span>
+          <button type="button" className="dash-rail-add" onClick={() => setCreatingCategory(true)} aria-label="Новая категория" title="Новая категория">+</button>
+        </div>
+
+        <div className="dash-rail-list">
+          {spheres.map((sphere) => {
+            const open = !!expanded[nodeKeyOf(sphere, [])];
+            const active = sel.sphere === sphere && !sel.path.length;
+            const count = counts.bySphere[sphere] ?? 0;
+            return (
+              <div className="dash-node" key={sphere}>
+                <div
+                  className={[
+                    'dash-node-row',
+                    active ? 'active' : '',
+                    overNode === sphere ? 'drop' : '',
+                  ].join(' ')}
+                  onClick={() => select(sphere, [])}
+                  {...rowDragProps({ kind: 'category', id: sphere, name: sphere, sphere, parentPath: [] })}
+                >
+                  {(tree[sphere]?.children.length ?? 0) > 0 ? (
+                    <button
+                      type="button"
+                      className={`dash-chev ${open ? 'open' : ''}`}
+                      onClick={(event) => { event.stopPropagation(); toggle(nodeKeyOf(sphere, [])); }}
+                      aria-label={open ? 'Свернуть папки' : 'Показать папки'}
+                      title={open ? 'Свернуть' : 'Папки'}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+                        <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+                  ) : (
+                    <span className="dash-chev-empty" aria-hidden />
+                  )}
+                  <span className="dash-node-name">{sphere}</span>
+                  {count > 0 && <span className="dash-node-count">{count}</span>}
+                  {canNest([]) && (
+                    <button
+                      type="button"
+                      className="dash-node-plus"
+                      onClick={(event) => { event.stopPropagation(); startAdd(sphere, []); }}
+                      aria-label="Папка в категории"
+                      title="Папка в категории"
+                    >+</button>
+                  )}
+                </div>
+                {open && renderFolders(sphere, tree[sphere]?.children ?? [], [], 1)}
+                {open && adding && adding.sphere === sphere && !adding.path.length && (
+                  <input
+                    autoFocus
+                    className="dash-sub-input"
+                    value={draftName}
+                    placeholder="папка"
+                    onChange={(event) => setDraftName(event.target.value)}
+                    onBlur={commitAdd}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') commitAdd();
+                      if (event.key === 'Escape') { setAdding(null); setDraftName(''); }
+                    }}
+                  />
+                )}
+              </div>
+            );
+          })}
+
+          {creatingCategory && (
+            <input
+              autoFocus
+              className="dash-rail-input"
+              value={newCategory}
+              placeholder="категория"
+              onChange={(event) => setNewCategory(event.target.value)}
+              onBlur={commitCategory}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') commitCategory();
+                if (event.key === 'Escape') { setNewCategory(''); setCreatingCategory(false); }
+              }}
+            />
+          )}
+
+          {!spheres.length && !creatingCategory && (
+            <button type="button" className="dash-rail-empty" onClick={() => setCreatingCategory(true)}>
+              пока пусто — создай первую категорию
+            </button>
+          )}
+        </div>
+
+        <div className="dash-rail-hint">
+          категория держит папки, папка — страницы, а всё содержимое живёт
+          на странице. пункт страницы можно поставить в план на конкретный день.
+        </div>
+      </aside>
+
+      <div className="dash-main">
+        <section className="dash-page">
+          <header className="dash-page-head">
+            {sel.sphere ? (
+              <>
+                <div className="dash-crumbs">
+                  {renaming ? (
+                    <input
+                      autoFocus
+                      className="dash-rename"
+                      defaultValue={sel.path.length ? sel.path[sel.path.length - 1] : sel.sphere}
+                      onBlur={(event) => commitRename(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') event.currentTarget.blur();
+                        if (event.key === 'Escape') {
+                          event.currentTarget.value = sel.path.length ? sel.path[sel.path.length - 1] : sel.sphere;
+                          event.currentTarget.blur();
+                        }
+                      }}
+                    />
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="dash-crumb"
+                        onClick={() => (sel.path.length ? select(sel.sphere, []) : setRenaming(true))}
+                        title={sel.path.length ? 'К категории' : 'Переименовать категорию'}
+                      >
+                        {sel.sphere}
+                      </button>
+                      {sel.path.map((name, at) => {
+                        const path = sel.path.slice(0, at + 1);
+                        const last = at === sel.path.length - 1;
+                        return (
+                          <span className="dash-crumb-group" key={`${name}-${at}`}>
+                            <span className="dash-crumb-sep">/</span>
+                            <button
+                              type="button"
+                              className={`dash-crumb ${last ? 'last' : ''}`}
+                              onClick={() => (last ? setRenaming(true) : select(sel.sphere, path))}
+                              title={last ? 'Переименовать' : 'К этой папке'}
+                            >
+                              {name}
+                            </button>
+                          </span>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
+
+                {isNote && <span className="dash-page-count">{list.length}</span>}
+
+                <div className="dash-page-actions">
+                  {isNote && missing.length > 0 && (
+                    <div className="dash-add-wrap">
+                      <button
+                        type="button"
+                        className="dash-add-block"
+                        onClick={() => setPaletteOpen((prev) => !prev)}
+                        aria-expanded={paletteOpen}
+                      >
+                        + блок
+                      </button>
+                      {paletteOpen && (
+                        <>
+                          <div className="dash-palette-backdrop" onClick={() => setPaletteOpen(false)} />
+                          <div className="dash-palette" role="menu">
+                            {missing.map((kind) => (
+                              <button
+                                key={kind}
+                                type="button"
+                                className="dash-palette-item"
+                                role="menuitem"
+                                onClick={() => addBlock(kind)}
+                              >
+                                <span className="dash-palette-name">{BLOCK_LABEL[kind]}</span>
+                                <span className="dash-palette-hint">{BLOCK_HINT[kind]}</span>
+                              </button>
+                            ))}
+                            {canNest(sel.path) && (
+                              <button
+                                type="button"
+                                className="dash-palette-item"
+                                role="menuitem"
+                                onClick={() => { setPaletteOpen(false); startAdd(sel.sphere, sel.path); }}
+                              >
+                                <span className="dash-palette-name">папка</span>
+                                <span className="dash-palette-hint">вложенная папка внутри этой</span>
+                              </button>
+                            )}
+
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {confirmDelete ? (
+                    <>
+                      <button type="button" className="dash-danger" onClick={deleteSelected}>
+                        {sel.path.length
+                          ? (isNote ? 'удалить заметку' : 'удалить папку')
+                          : 'удалить категорию'}
+                      </button>
+                      <button type="button" className="dash-muted" onClick={() => setConfirmDelete(false)}>отмена</button>
+                    </>
+                  ) : (
+                    <button type="button" className="dash-muted" onClick={() => setConfirmDelete(true)}>удалить</button>
+                  )}
+                </div>
+              </>
+            ) : (
+              <span className="dash-panel-title">дашборд</span>
+            )}
+          </header>
+
+          {sel.sphere ? (
+            isNote ? (
+              noteDoc ? (
+                <>
+                <NoteEditor
+                  key={noteDoc.id}
+                  doc={noteDoc}
+                  sphere={sel.sphere}
+                  topic={pathKey(sel.path)}
+                  onTitleChange={commitRename}
+                />
+                {renderBlocks()}
+                </>
+              ) : (
+                <div className="dash-hint-line">
+                  эта заметка не найдена — возможно, её удалили на другом устройстве
+                </div>
+              )
+            ) : (
+              <div className="dash-container">
+                <div className="dash-container-text">
+                  {sel.path.length
+                    ? 'в папке ничего не пишется: она только держит страницы'
+                    : 'категория держит только папки — всё содержимое живёт на страницах'}
+                </div>
+                <div className="dash-container-actions">
+                  {canNest(sel.path) && (
+                    <button type="button" className="dash-primary" onClick={() => startAdd(sel.sphere, sel.path)}>
+                      + папка
+                    </button>
+                  )}
+                  {canPage(sel.path) && (
+                    <button type="button" className="dash-primary" onClick={() => startAdd(sel.sphere, sel.path, 'note')}>
+                      + страница
+                    </button>
+                  )}
+                </div>
+                {(sel.path.length ? (current?.children ?? []) : (category?.children ?? [])).length > 0 ? (
+                  <div className="dash-children">
+                    {(sel.path.length ? (current?.children ?? []) : (category?.children ?? [])).map((child) => (
+                      <button
+                        type="button"
+                        className="dash-child"
+                        key={child.id}
+                        onClick={() => select(sel.sphere, [...sel.path, child.name])}
+                      >
+                        <span className={`dash-child-icon ${child.kind}`} aria-hidden>
+                          {child.kind === 'note' ? '▤' : '▸'}
+                        </span>
+                        <span className="dash-child-name">{child.name}</span>
+                        <span className="dash-child-kind">{child.kind === 'note' ? 'страница' : 'папка'}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="dash-container-empty">пока пусто — создай первую</div>
+                )}
+              </div>
             )
           ) : (
             <div className="dash-hint-line">создай категорию слева — внутри неё собираются блоки</div>

@@ -347,6 +347,14 @@ export function flushBoard(): void {
   persist();
 }
 
+/** Does any sticker/picture/page-document live under this node key? */
+export function itemsUnderKey(nodeKey: string): boolean {
+  if (!nodeKey) return false;
+  const prefix = nodeKey.endsWith('\u001F') ? nodeKey : `${nodeKey}\u001F`;
+  return Object.values(items).some((item) => !item.deleted && !!item.nodeKey
+    && (item.nodeKey === nodeKey || item.nodeKey.startsWith(prefix)));
+}
+
 /** Tombstone the note-documents that lived inside a deleted folder: their tree
  *  nodes are gone, tasks they planned to a day stay (they are real tasks). */
 export function removeDocsUnder(nodeKey: string): void {

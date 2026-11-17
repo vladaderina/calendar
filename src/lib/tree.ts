@@ -34,7 +34,11 @@ export type NodeKind = 'folder' | 'note';
 export interface TreeNode {
   id: string;
   name: string;
-  /** A folder holds folders and notes; a note holds a document, never children. */
+  /**
+ * `folder` — a container: nothing is written inside it, it only holds folders
+ * and pages. `note` — a PAGE: the only place with content (checklist, blocks,
+ * stickers, photos); it is always a leaf.
+ */
   kind: NodeKind;
   blocks: BlockKind[];
   children: TreeNode[];
@@ -56,9 +60,14 @@ export const MAX_LEVEL = 3;
 /** May a FOLDER be created inside a node at `path`? (category → folder → folder) */
 export const canAddChild = (path: string[]): boolean => path.length + 1 <= MAX_LEVEL - 1;
 
-/** May a NOTE be created inside a node at `path`? Notes are leaves, so they also
- *  fit into the last folders: category → folder → folder → notes. */
-export const canAddNote = (path: string[]): boolean => path.length + 1 <= MAX_LEVEL;
+/** May a PAGE be created inside a node at `path`? Pages are leaves, so they also
+ *  fit into the last folders: category → folder → folder → page. A category
+ *  itself only holds folders (the user's rule), so its pages come only from the
+ *  legacy migration. */
+export const canAddPage = (path: string[]): boolean => path.length + 1 <= MAX_LEVEL;
+
+/** Categories (level 1) hold folders only; folders hold folders and pages. */
+export const canHoldPages = (path: string[]): boolean => path.length >= 1;
 
 const SEP = '\u001F';
 
@@ -87,12 +96,13 @@ export const newNode = (name: string, blocks: BlockKind[] = []): TreeNode => ({
   children: [],
 });
 
-/** A note is a leaf: title here, checklist inside the linked document. */
-export const newNoteNode = (title: string, noteId: string): TreeNode => ({
+/** A page is a leaf: the title here, the checklist and the blocks inside the
+ *  linked document. */
+export const newNoteNode = (title: string, noteId: string, blocks: BlockKind[] = []): TreeNode => ({
   id: uuid(),
   name: title.trim(),
   kind: 'note',
-  blocks: [],
+  blocks: [...blocks],
   children: [],
   noteId,
 });
@@ -130,8 +140,8 @@ function normNodes(raw: unknown, legacyBlocks: BlockKind[]): TreeNode[] {
       id: typeof src.id === 'string' && src.id ? src.id : uuid(),
       name,
       kind,
-      // A note is a document, not a place for blocks or sub-nodes.
-      blocks: kind === 'note' ? [] : normBlocks(src.blocks, legacyBlocks),
+      // A page owns blocks, a folder's blocks are legacy (migrated into a page).
+      blocks: normBlocks(src.blocks, kind === 'note' ? [] : legacyBlocks),
       children: kind === 'note' ? [] : normNodes(src.children, legacyBlocks),
       noteId: kind === 'note' && typeof src.noteId === 'string' && src.noteId ? src.noteId : undefined,
     });
