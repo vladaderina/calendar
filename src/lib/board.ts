@@ -80,6 +80,11 @@ export interface BoardDoc {
   id: string;
   kind: 'doc';
   title: string;
+  /** The note itself, as Markdown — the primary content since the dashboard was
+   *  rebuilt around "one blank page like Notion". */
+  md?: string;
+  /** LEGACY: the line/checkbox blocks of the old editor. Read once by
+   *  `lib/doc.ts` to build `md`, never written again. */
   blocks: DocBlock[];
   nodeKey: string;
   born: number;
@@ -140,11 +145,13 @@ function sanitize(id: string, value: unknown): BoardItem | null {
   if (src.kind === 'doc') {
     const title = typeof src.title === 'string' ? src.title : '';
     const blocks = sanitizeBlocks(src.blocks);
-    if (!title.trim() && !blocks.length && !deleted) return null;
+    const md = typeof src.md === 'string' ? src.md : undefined;
+    if (!title.trim() && !blocks.length && !md && !deleted) return null;
     return {
       id,
       kind: 'doc',
       title,
+      md,
       blocks,
       nodeKey: typeof src.nodeKey === 'string' ? src.nodeKey : '',
       born: Number(src.born) || t,
@@ -288,6 +295,16 @@ export function getBoardPhotos(): BoardPhoto[] {
   return photosSnapshot;
 }
 
+/** Every document, for code that runs outside a component (migrations). */
+export function getBoardDocs(): BoardDoc[] {
+  return docsSnapshot;
+}
+
+/** Every sticker, for code that runs outside a component (migrations). */
+export function getBoardNotes(): BoardNote[] {
+  return notesSnapshot;
+}
+
 export function useBoardDocs(): BoardDoc[] {
   return useSyncExternalStore(subscribe, () => docsSnapshot, () => docsSnapshot);
 }
@@ -360,13 +377,14 @@ export function updateBoardNote(id: string, patch: { text?: string; color?: stri
 }
 
 /** Create an empty note-document — the file the tree shows as a note. */
-export function addBoardDoc(title: string, nodeKey = ''): BoardDoc {
+export function addBoardDoc(title: string, nodeKey = '', md = ''): BoardDoc {
   const id = uuid();
   const now = Date.now();
   const doc: BoardDoc = {
     id,
     kind: 'doc',
     title: title.trim() || 'без названия',
+    md,
     blocks: [],
     nodeKey,
     born: now,
@@ -391,12 +409,13 @@ function persistSoon(): void {
   }, 600);
 }
 
-export function saveBoardDoc(id: string, patch: { title?: string; blocks?: DocBlock[] }): void {
+export function saveBoardDoc(id: string, patch: { title?: string; md?: string; blocks?: DocBlock[] }): void {
   const cur = items[id];
   if (!cur || cur.kind !== 'doc' || cur.deleted) return;
   items[id] = {
     ...cur,
     title: patch.title !== undefined ? patch.title : cur.title,
+    md: patch.md !== undefined ? patch.md : cur.md,
     blocks: patch.blocks ?? cur.blocks,
     t: Date.now(),
   };

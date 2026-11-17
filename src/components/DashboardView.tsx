@@ -1,44 +1,39 @@
+// The dashboard: a goal board for the spheres of life.
+//
+// Structure the user asked for: spheres → folders/pages → ONE blank note per
+// page, written in Markdown, where a checklist line can be planned to a day and
+// becomes a real calendar task. There are no "blocks" any more — a page is a
+// page, and the note is the whole content.
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { DragEvent, ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import type { Task } from '../types';
-import { TaskItem } from './TaskItem';
 import { retryLocalPersist, store, useSpheres, useTasks, useTopics } from '../store';
-import { sortByPriority } from '../utils/date';
 import {
-  BLOCK_HINT,
-  BLOCK_LABEL,
   canAddChild,
   canAddPage,
-  canHoldPages,
-  inSubtree,
   keyPath,
   nodeAt,
   pathKey,
-  type BlockKind,
   type TreeNode,
 } from '../lib/tree';
 import {
-  NOTE_COLORS,
   addBoardDoc,
-  addBoardNote,
-  addBoardPhoto,
   claimOrphans,
-  removeBoardItem,
+  hydrateBoard,
   removeDocsUnder,
   rekeyNode,
-  saveBoardDoc,
   startBoardSync,
   syncBoard,
-  updateBoardNote,
-  updateBoardPhoto,
-  hydrateBoard,
   useBoardDocs,
   useBoardNotes,
   useBoardPhotos,
+  type BoardDoc,
+  type BoardPhoto,
 } from '../lib/board';
-import { NoteEditor } from './NoteEditor';
-import { fileToDataUrl } from '../lib/image';
-import { upgradeDashboardModel } from '../lib/migrate';
+import { docMarkdown } from '../lib/doc';
+import { checkCounts, isoDay } from '../lib/md';
+import { adoptContainerTasks, upgradeDashboardModel } from '../lib/migrate';
+import { PageView } from './PageView';
 
 interface Props {
   onEdit: (task: Task) => void;
@@ -47,192 +42,108 @@ interface Props {
 type Selection = { sphere: string; path: string[] };
 
 const SEP = '\u001F';
-
-/** Identity of a dashboard node: its category plus the folder path. */
 const nodeKeyOf = (sphere: string, path: string[]): string => `${sphere}${SEP}${pathKey(path)}`;
 
-function reorderIds(ids: string[], draggedId: string, targetId: string): string[] {
-  const next = ids.filter((id) => id !== draggedId);
-  let at = next.indexOf(targetId);
-  if (at < 0) at = next.length;
-  else at += 1;
-  next.splice(at, 0, draggedId);
-  return next;
+const MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+const WEEKDAYS = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+
+function todayLabel(): string {
+  const now = new Date();
+  return `${WEEKDAYS[now.getDay()]}, ${now.getDate()} ${MONTHS[now.getMonth()]}`;
 }
 
-function makeReorderInNode(tasks: Task[], sphere: string, topic: string | undefined, list: Task[]) {
-  return (draggedId: string, targetId: string, place: 'above' | 'below') => {
-    const dragged = tasks.find((task) => task.id === draggedId);
-    if (dragged && (dragged.unplanned || dragged.sphere !== sphere || dragged.topic !== topic)) {
-      store.update(draggedId, { sphere, topic, unplanned: false });
-    }
-    const ids = list.map((task) => task.id).filter((id) => id !== draggedId);
-    let index = ids.indexOf(targetId);
-    if (index < 0) index = ids.length;
-    else if (place === 'below') index += 1;
-    ids.splice(index, 0, draggedId);
-    store.reorder(ids);
-  };
+function greeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 5) return 'доброй ночи';
+  if (hour < 12) return 'доброе утро';
+  if (hour < 18) return 'добрый день';
+  return 'добрый вечер';
 }
 
-function QuickAdd({ sphere, topic, onDone }: { sphere: string; topic: string | undefined; onDone: () => void }) {
-  const [value, setValue] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
-  const allTasks = useTasks();
-  const query = value.trim().toLowerCase();
-  const suggestions = query
-    ? Array.from(new Set(allTasks.map((task) => task.title)))
-      .filter((title) => title.toLowerCase().includes(query))
-      .slice(0, 5)
-    : [];
-
-  const submit = () => {
-    const title = value.trim();
-    if (title) {
-      store.add({ title, sphere, topic, unplanned: true });
-      setValue('');
-      inputRef.current?.focus();
-    } else {
-      onDone();
-    }
-  };
-
-  return (
-    <div className="quick-add-wrap">
-      <input
-        ref={inputRef}
-        autoFocus
-        className="quick-add"
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        onBlur={submit}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') submit();
-          else if (event.key === 'Escape') onDone();
-        }}
-      />
-      {suggestions.length > 0 && (
-        <div className="quick-add-suggestions">
-          {suggestions.map((suggestion) => (
-            <div
-              key={suggestion}
-              className="search-suggestion"
-              onMouseDown={(event) => { event.preventDefault(); setValue(suggestion); }}
-            >
-              <span className="suggestion-title">{suggestion}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+function shift(iso: string, days: number): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  return isoDay(new Date(y, m - 1, d + days));
 }
 
-/** A sticky note: click the text to edit, ✕ to remove, the dot to recolour. */
-function NoteCard({ id, text, color }: { id: string; text: string; color: string }) {
-  const cycleColor = () => {
-    const at = NOTE_COLORS.indexOf(color);
-    updateBoardNote(id, { color: NOTE_COLORS[(at + 1) % NOTE_COLORS.length] });
-  };
-  return (
-    <div className="dash-note" style={{ background: color }}>
-      <div
-        className="dash-note-text"
-        contentEditable
-        suppressContentEditableWarning
-        spellCheck={false}
-        onBlur={(event) => {
-          const next = event.currentTarget.textContent ?? '';
-          if (next.trim() !== text) updateBoardNote(id, { text: next });
-        }}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape') {
-            event.currentTarget.textContent = text;
-            event.currentTarget.blur();
-          }
-        }}
-      >
-        {text}
-      </div>
-      <div className="dash-note-actions">
-        <button type="button" className="dash-note-color" onClick={cycleColor} aria-label="Сменить цвет" title="Сменить цвет" />
-        <button type="button" className="dash-note-del" onClick={() => removeBoardItem(id)} aria-label="Удалить заметку" title="Удалить">×</button>
-      </div>
-    </div>
-  );
+interface Stats {
+  done: number;
+  total: number;
+  planned: number;
+  pages: number;
 }
 
-function BlockHead({
-  title,
-  count,
-  actions,
-  onRemove,
+const EMPTY_STATS: Stats = { done: 0, total: 0, planned: 0, pages: 0 };
+
+function InlineInput({
+  placeholder,
+  onSubmit,
+  onCancel,
 }: {
-  title: string;
-  count?: number;
-  actions?: ReactNode;
-  onRemove: () => void;
+  placeholder: string;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
 }) {
+  const [value, setValue] = useState('');
   return (
-    <header className="dash-block-head">
-      <span className="dash-block-title">{title}</span>
-      {typeof count === 'number' && count > 0 && <span className="dash-block-count">{count}</span>}
-      <div className="dash-block-actions">
-        {actions}
-        <button type="button" className="dash-block-remove" onClick={onRemove} title="Убрать блок" aria-label="Убрать блок">×</button>
-      </div>
-    </header>
+    <input
+      className="dsh-new-input"
+      autoFocus
+      value={value}
+      placeholder={placeholder}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={() => (value.trim() ? onSubmit(value) : onCancel())}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          if (value.trim()) onSubmit(value);
+          else onCancel();
+        } else if (event.key === 'Escape') {
+          onCancel();
+        }
+      }}
+    />
+  );
+}
+
+function Progress({ stats }: { stats: Stats }) {
+  if (!stats.total) return null;
+  const percent = Math.round((stats.done / stats.total) * 100);
+  return (
+    <span className="dsh-progress" title={`${stats.done} из ${stats.total} пунктов`}>
+      <span className="dsh-progress-bar"><span style={{ width: `${percent}%` }} /></span>
+      <span className="dsh-progress-num">{percent}%</span>
+    </span>
   );
 }
 
 export function DashboardView({ onEdit }: Props) {
-  const tasks = useTasks();
   const spheres = useSpheres();
+  const tasks = useTasks();
   const tree = useTopics();
+  const docs = useBoardDocs();
   const photos = useBoardPhotos();
   const notes = useBoardNotes();
-  const docs = useBoardDocs();
 
-  const [sel, setSel] = useState<Selection>(() => ({ sphere: spheres[0] ?? '', path: [] }));
-  const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
-    spheres[0] ? { [nodeKeyOf(spheres[0], [])]: true } : {},
-  );
-  const [adding, setAdding] = useState<{ sphere: string; path: string[]; kind: 'folder' | 'note' } | null>(null);
-  const [draftName, setDraftName] = useState('');
-  const [creatingCategory, setCreatingCategory] = useState(false);
-  const [newCategory, setNewCategory] = useState('');
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [addingTask, setAddingTask] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [overNode, setOverNode] = useState<string | null>(null);
-  const dragRef = useRef<{ kind: 'category' | 'folder'; id: string; name: string; sphere: string; parentPath: string[] } | null>(null);
-
-  const [noteDraft, setNoteDraft] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [boardError, setBoardError] = useState('');
-  const [lightbox, setLightbox] = useState<string | null>(null);
+  const [sel, setSel] = useState<Selection>({ sphere: '', path: [] });
+  const [expanded, setExpanded] = useState<string[]>([]);
+  const [query, setQuery] = useState('');
+  const [sheet, setSheet] = useState(false);
+  const [creating, setCreating] = useState<{ sphere: string; parent: string[]; kind: 'folder' | 'page' } | null>(null);
+  const [addingSphere, setAddingSphere] = useState(false);
+  const [confirmKey, setConfirmKey] = useState('');
+  const [pageConfirm, setPageConfirm] = useState(false);
+  const [toast, setToast] = useState('');
+  const sideRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => startBoardSync(), []);
 
-  useEffect(() => {
-    if (!boardError) return;
-    const id = window.setTimeout(() => setBoardError(''), 6000);
-    return () => window.clearTimeout(id);
-  }, [boardError]);
-
-  // Entries made before the dashboard had nodes carry no nodeKey: park them in
-  // the first category so nothing disappears.
   useEffect(() => {
     if (!spheres.length) return;
     claimOrphans(nodeKeyOf(spheres[0], []));
   }, [spheres]);
 
-  // Old categories/folders kept blocks of their own; containers hold nothing
-  // now, so those blocks move into a «страница» child. Runs once the picture
-  // bytes have been moved out of localStorage (otherwise the writes hit the
-  // quota) and again whenever the task list grows — a task that arrives from
-  // the server without a page would be invisible.
+  // Pictures out of localStorage first (the quota is what breaks saving), then
+  // the conversion of the old block-documents into Markdown notes.
   useEffect(() => {
     let cancelled = false;
     void hydrateBoard().then(() => {
@@ -241,17 +152,19 @@ export function DashboardView({ onEdit }: Props) {
       upgradeDashboardModel();
     });
     return () => { cancelled = true; };
-  }, [tasks.length, spheres.length]);
+  }, [tasks.length, spheres.length, docs.length]);
 
-  // Keep the selection valid when categories/folders vanish (deleted here or
-  // on the other device).
   useEffect(() => {
-    if (!spheres.length) {
-      if (sel.sphere) setSel({ sphere: '', path: [] });
-      return;
-    }
+    if (!toast) return;
+    const id = window.setTimeout(() => setToast(''), 4000);
+    return () => window.clearTimeout(id);
+  }, [toast]);
+
+  // Keep the selection on something that still exists.
+  useEffect(() => {
+    if (!sel.sphere) return;
     if (!spheres.includes(sel.sphere)) {
-      setSel({ sphere: spheres[0], path: [] });
+      setSel({ sphere: '', path: [] });
       return;
     }
     if (!sel.path.length) return;
@@ -260,812 +173,800 @@ export function DashboardView({ onEdit }: Props) {
     if (path.length !== sel.path.length) setSel({ sphere: sel.sphere, path });
   }, [spheres, tree, sel.sphere, sel.path]);
 
-  const counts = useMemo(() => {
-    const bySphere: Record<string, number> = {};
-    const byNode: Record<string, number> = {};
-    for (const task of tasks) {
-      if (task.startDate || !task.sphere || task.completed) continue;
-      bySphere[task.sphere] = (bySphere[task.sphere] ?? 0) + 1;
-      const parts = keyPath(task.topic);
-      for (let i = 1; i <= parts.length; i++) {
-        const key = nodeKeyOf(task.sphere, parts.slice(0, i));
-        byNode[key] = (byNode[key] ?? 0) + 1;
+  const docByKey = useMemo(() => {
+    const map = new Map<string, BoardDoc>();
+    for (const doc of docs) map.set(doc.nodeKey, doc);
+    return map;
+  }, [docs]);
+
+  /** Progress of a container = every page document beneath it. */
+  const statsUnder = useMemo(() => {
+    const byKey = new Map<string, Stats>();
+    for (const doc of docs) {
+      const counts = checkCounts(docMarkdown(doc, notes, tasks));
+      const parts = doc.nodeKey.split(SEP);
+      const sphere = parts[0];
+      const names = keyPath(parts.slice(1).join(SEP));
+      for (let depth = 0; depth <= names.length; depth++) {
+        const key = depth === 0 ? `${sphere}${SEP}` : `${sphere}${SEP}${pathKey(names.slice(0, depth))}`;
+        const cur = byKey.get(key) ?? { ...EMPTY_STATS };
+        cur.done += counts.done;
+        cur.total += counts.total;
+        cur.planned += counts.planned;
+        if (depth === names.length) cur.pages += 1;
+        byKey.set(key, cur);
       }
     }
-    return { bySphere, byNode };
-  }, [tasks]);
+    return byKey;
+  }, [docs, notes, tasks]);
 
-  const category = tree[sel.sphere];
-  const current: TreeNode | null = sel.path.length ? nodeAt(category?.children ?? [], sel.path) : null;
-  const isNote = current?.kind === 'note';
-  const noteDoc = isNote ? docs.find((item) => item.id === current?.noteId) ?? null : null;
-  // Blocks live ONLY on a page (a category or a folder writes nothing).
-  const blocks: BlockKind[] = isNote ? (current?.blocks ?? []) : [];
-  const nodeKey = nodeKeyOf(sel.sphere, sel.path);
-  const topicKey = sel.path.length ? pathKey(sel.path) : undefined;
+  const statsOf = (sphere: string, path: string[]): Stats => (path.length
+    ? statsUnder.get(nodeKeyOf(sphere, path)) ?? EMPTY_STATS
+    : statsUnder.get(`${sphere}${SEP}`) ?? EMPTY_STATS);
 
-  const nodeNotes = useMemo(() => notes.filter((note) => note.nodeKey === nodeKey), [notes, nodeKey]);
-  const nodePhotos = useMemo(() => photos.filter((photo) => photo.nodeKey === nodeKey), [photos, nodeKey]);
-  const list = useMemo(
-    () => sortByPriority(tasks.filter((task) => {
-      if (task.startDate || !task.sphere || task.completed) return false;
-      if (task.sphere !== sel.sphere) return false;
-      return inSubtree(task.topic, sel.path);
-    })),
-    [tasks, sel.sphere, sel.path],
+  /** The picture that represents a sphere/folder: the first one beneath it. */
+  const coverOf = useMemo(() => {
+    const map = new Map<string, BoardPhoto>();
+    for (const photo of photos) {
+      if (!photo.nodeKey) continue;
+      const parts = photo.nodeKey.split(SEP);
+      const sphere = parts[0];
+      const names = keyPath(parts.slice(1).join(SEP));
+      for (let depth = 0; depth <= names.length; depth++) {
+        const key = depth === 0 ? `${sphere}${SEP}` : `${sphere}${SEP}${pathKey(names.slice(0, depth))}`;
+        if (!map.has(key)) map.set(key, photo);
+      }
+    }
+    return map;
+  }, [photos]);
+
+  const today = isoDay(new Date());
+  const todayTasks = useMemo(() => tasks
+    .filter((task) => !task.completed && task.startDate === today), [tasks, today]);
+  const overdueTasks = useMemo(() => tasks
+    .filter((task) => !task.completed && !!task.startDate && task.startDate < today), [tasks, today]);
+  const weekTasks = useMemo(() => tasks
+    .filter((task) => !task.completed && !!task.startDate && task.startDate > today && task.startDate <= shift(today, 7)), [tasks, today]);
+
+  const allPages = useMemo(() => {
+    const out: { sphere: string; path: string[]; node: TreeNode }[] = [];
+    const walk = (sphere: string, nodes: TreeNode[], prefix: string[]) => {
+      for (const node of nodes) {
+        const path = [...prefix, node.name];
+        if (node.kind === 'note') out.push({ sphere, path, node });
+        else walk(sphere, node.children, path);
+      }
+    };
+    for (const [sphere, category] of Object.entries(tree)) walk(sphere, category.children, []);
+    return out;
+  }, [tree]);
+
+  const searchResults = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const rows: { sphere: string; path: string[]; label: string; kind: 'folder' | 'page' | 'category' }[] = [];
+    for (const [sphere, category] of Object.entries(tree)) {
+      if (sphere.toLowerCase().includes(q)) rows.push({ sphere, path: [], label: sphere, kind: 'category' });
+      const walk = (nodes: TreeNode[], prefix: string[]) => {
+        for (const node of nodes) {
+          const path = [...prefix, node.name];
+          const doc = docByKey.get(nodeKeyOf(sphere, path));
+          const inText = doc ? docMarkdown(doc, notes, tasks).toLowerCase().includes(q) : false;
+          if (node.name.toLowerCase().includes(q) || inText) {
+            rows.push({ sphere, path, label: node.name, kind: node.kind === 'note' ? 'page' : 'folder' });
+          }
+          walk(node.children, path);
+        }
+      };
+      walk(category.children, []);
+    }
+    return rows.slice(0, 40);
+  }, [query, tree, docByKey, notes, tasks]);
+
+  const recent = useMemo(() => docs
+    .filter((doc) => !doc.deleted)
+    .sort((a, b) => b.t - a.t)
+    .slice(0, 4)
+    .map((doc) => {
+      const parts = doc.nodeKey.split(SEP);
+      return { doc, sphere: parts[0], path: keyPath(parts.slice(1).join(SEP)) };
+    })
+    .filter((row) => row.path.length > 0), [docs]);
+
+  const selectedNode = useMemo(() => (sel.sphere && sel.path.length
+    ? nodeAt(tree[sel.sphere]?.children ?? [], sel.path)
+    : null), [tree, sel]);
+
+  const open = (sphere: string, path: string[]) => {
+    setSel({ sphere, path });
+    setSheet(false);
+    setQuery('');
+    setPageConfirm(false);
+    if (path.length) {
+      setExpanded((list) => Array.from(new Set([...list, sphere, `${sphere}${SEP}${pathKey(path)}`])));
+    }
+  };
+
+  const openCategory = (sphere: string) => {
+    setSel({ sphere, path: [] });
+    setSheet(false);
+    setQuery('');
+    setConfirmKey('');
+  };
+
+  const goHome = () => {
+    setSel({ sphere: '', path: [] });
+    setSheet(false);
+    setQuery('');
+  };
+
+  const createNode = (sphere: string, parent: string[], kind: 'folder' | 'page', name: string) => {
+    const title = name.trim();
+    setCreating(null);
+    if (!title) return;
+    if (kind === 'folder') {
+      store.addTopic(sphere, title, parent);
+      setExpanded((list) => Array.from(new Set([...list, sphere, `${sphere}${SEP}${pathKey(parent)}`])));
+      return;
+    }
+    const path = [...parent, title];
+    const doc = addBoardDoc(title, nodeKeyOf(sphere, path));
+    store.addNote(sphere, parent, title, doc.id);
+    open(sphere, path);
+  };
+
+  const removeNode = (sphere: string, path: string[]) => {
+    const key = nodeKeyOf(sphere, path);
+    if (!path.length) {
+      removeDocsUnder(key);
+      store.removeSphere(sphere);
+      if (sel.sphere === sphere) goHome();
+      return;
+    }
+    removeDocsUnder(key);
+    // Pictures and stickers of a deleted page/folder move one level up instead
+    // of becoming unreachable orphans.
+    rekeyNode(key, nodeKeyOf(sphere, path.slice(0, -1)));
+    store.removeTopic(sphere, path);
+    if (sel.sphere === sphere && pathKey(sel.path).startsWith(pathKey(path))) {
+      setSel({ sphere, path: path.slice(0, -1) });
+    }
+  };
+
+  const renameNode = (sphere: string, path: string[], name: string) => {
+    const next = name.trim();
+    if (!next || next === path[path.length - 1]) return;
+    const fromKey = nodeKeyOf(sphere, path);
+    const toPath = [...path.slice(0, -1), next];
+    store.renameTopic(sphere, path, next);
+    rekeyNode(fromKey, nodeKeyOf(sphere, toPath));
+    if (sel.sphere === sphere && pathKey(sel.path) === pathKey(path)) setSel({ sphere, path: toPath });
+  };
+
+  const pageDoc = useMemo(() => {
+    if (!selectedNode || selectedNode.kind !== 'note' || !sel.sphere) return null;
+    const key = nodeKeyOf(sel.sphere, sel.path);
+    const existing = docByKey.get(key);
+    if (existing) return existing;
+    if (selectedNode.noteId) {
+      const byId = docs.find((doc) => doc.id === selectedNode.noteId);
+      if (byId) return byId;
+    }
+    return null;
+  }, [selectedNode, sel, docByKey, docs]);
+
+  // A page node that lost its document gets a fresh one, linked for good.
+  useEffect(() => {
+    if (!sel.sphere || !selectedNode || selectedNode.kind !== 'note' || pageDoc) return;
+    const key = nodeKeyOf(sel.sphere, sel.path);
+    const created = addBoardDoc(sel.path[sel.path.length - 1] ?? 'заметка', key);
+    store.setNoteId(sel.sphere, sel.path, created.id);
+  }, [sel, selectedNode, pageDoc]);
+
+  const pagePhotos = photos.filter((photo) => photo.nodeKey === nodeKeyOf(sel.sphere, sel.path));
+
+  // Tasks filed to the container itself (a page was deleted, or the task was
+  // made elsewhere): they live in the calendar but are not on any page yet.
+  const unfiled = sel.sphere
+    ? tasks.filter((task) => task.sphere === sel.sphere && (task.topic ?? '') === pathKey(sel.path))
+    : [];
+
+  const unfiledBanner = unfiled.length > 0 && (
+    <div className="dsh-unfiled">
+      <span className="dsh-unfiled-text">
+        {unfiled.length === 1 ? '1 задача вне страниц' : `${unfiled.length} задач вне страниц`}
+        {' — '}они в календаре, но не в заметке
+      </span>
+      <button
+        type="button"
+        className="dsh-unfiled-btn"
+        onClick={() => {
+          adoptContainerTasks(sel.sphere, sel.path);
+          setToast('собрал задачи в страницу');
+        }}
+      >
+        собрать в страницу
+      </button>
+    </div>
   );
 
-  const canNest = (path: string[]) => canAddChild(path);
-  // A category holds folders only; pages appear from the first folder down.
-  const canPage = (path: string[]) => canHoldPages(path) && canAddPage(path);
-
-  const select = (sphere: string, path: string[]) => {
-    setSel({ sphere, path });
-    setAddingTask(false);
-    setPaletteOpen(false);
-    setRenaming(false);
-    setConfirmDelete(false);
-    setAdding(null);
-    setExpanded((prev) => {
-      const next = { ...prev, [nodeKeyOf(sphere, [])]: true };
-      for (let i = 1; i <= path.length; i++) next[nodeKeyOf(sphere, path.slice(0, i))] = true;
-      return next;
-    });
-  };
-
-  const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
-
-  const startAdd = (sphere: string, parentPath: string[], kind: 'folder' | 'note' = 'folder') => {
-    if (kind === 'note' ? !canPage(parentPath) : !canAddChild(parentPath)) return;
-    setAdding({ sphere, path: parentPath, kind });
-    setDraftName('');
-    setExpanded((prev) => {
-      const next = { ...prev };
-      for (let i = 0; i <= parentPath.length; i++) next[nodeKeyOf(sphere, parentPath.slice(0, i))] = true;
-      return next;
-    });
-  };
-
-  const commitAdd = () => {
-    if (!adding) return;
-    const kind = adding.kind;
-    const name = kind === 'note' ? (draftName.trim() || 'без названия') : draftName.trim();
-    if (name) {
-      const siblings = adding.path.length
-        ? (nodeAt(tree[adding.sphere]?.children ?? [], adding.path)?.children ?? [])
-        : (tree[adding.sphere]?.children ?? []);
-      if (!siblings.some((node) => node.name === name)) {
-        if (kind === 'note') {
-          // The checklist lives in a document; the tree only keeps the title.
-          const nodeKey = nodeKeyOf(adding.sphere, [...adding.path, name]);
-          const item = addBoardDoc(name, nodeKey);
-          store.addNote(adding.sphere, adding.path, name, item.id);
-        } else {
-          store.addTopic(adding.sphere, name, adding.path);
-        }
-        select(adding.sphere, [...adding.path, name]);
-      }
-    }
-    setAdding(null);
-    setDraftName('');
-  };
-
-  const commitCategory = () => {
-    const name = newCategory.trim();
-    if (name && !spheres.includes(name)) {
-      store.addSphere(name);
-      select(name, []);
-    }
-    setNewCategory('');
-    setCreatingCategory(false);
-  };
-
-  const addBlock = (kind: BlockKind) => {
-    store.setBlocks(sel.sphere, sel.path, [...blocks, kind]);
-    setPaletteOpen(false);
-  };
-
-  const removeBlock = (kind: BlockKind) => {
-    store.setBlocks(sel.sphere, sel.path, blocks.filter((block) => block !== kind));
-  };
-
-  const commitRename = (value: string) => {
-    const name = value.trim();
-    setRenaming(false);
-    if (!name || !sel.sphere) return;
-    if (!sel.path.length) {
-      if (name !== sel.sphere) {
-        store.renameSphere(sel.sphere, name);
-        setSel((prev) => ({ ...prev, sphere: name }));
-      }
-      return;
-    }
-    if (name === sel.path[sel.path.length - 1]) return;
-    const node = nodeAt(tree[sel.sphere]?.children ?? [], sel.path);
-    const nextPath = [...sel.path.slice(0, -1), name];
-    const oldKey = nodeKeyOf(sel.sphere, sel.path);
-    store.renameTopic(sel.sphere, sel.path, name);
-    if (node?.kind === 'note') {
-      if (node.noteId) saveBoardDoc(node.noteId, { title: name });
-    }
-    // Stickers, pictures and documents are keyed by the PATH OF NAMES: without
-    // this the renamed folder (or note) would lose all of them.
-    rekeyNode(oldKey, nodeKeyOf(sel.sphere, nextPath));
-    setSel((prev) => ({ ...prev, path: nextPath }));
-  };
-
-  const deleteSelected = () => {
-    setConfirmDelete(false);
-    if (!sel.sphere) return;
-    if (!sel.path.length) {
-      // The notes inside the category go with it; their planned tasks stay.
-      removeDocsUnder(nodeKeyOf(sel.sphere, []));
-      store.removeSphere(sel.sphere);
-      setSel({ sphere: '', path: [] });
-      return;
-    }
-    const node = nodeAt(tree[sel.sphere]?.children ?? [], sel.path);
-    const key = nodeKeyOf(sel.sphere, sel.path);
-    store.removeTopic(sel.sphere, sel.path);
-    if (node?.kind === 'note') {
-      if (node.noteId) removeBoardItem(node.noteId);
-    } else {
-      // Note-documents inside the deleted folder go with it (the tasks they
-      // planned to a day stay — those are real tasks now); stickers and
-      // pictures move one level up instead of becoming unreachable.
-      removeDocsUnder(key);
-      rekeyNode(key, nodeKeyOf(sel.sphere, sel.path.slice(0, -1)));
-    }
-    setSel({ sphere: sel.sphere, path: sel.path.slice(0, -1) });
-  };
-
-  const submitNote = () => {
-    if (!noteDraft.trim()) return;
-    addBoardNote(noteDraft, NOTE_COLORS[nodeNotes.length % NOTE_COLORS.length], nodeKey);
-    setNoteDraft('');
-  };
-
-  const onFiles = async (files: FileList | null) => {
-    if (!files || !files.length) return;
-    setUploading(true);
-    setBoardError('');
-    try {
-      for (const file of Array.from(files)) {
-        if (!file.type.startsWith('image/')) continue;
-        const data = await fileToDataUrl(file);
-        const result = addBoardPhoto(data, '', nodeKey);
-        if (!result.ok) {
-          setBoardError(result.message);
-          break;
-        }
-      }
-    } catch {
-      setBoardError('не получилось прочитать фото');
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const dropTask = (event: DragEvent, sphere: string, path: string[]): boolean => {
-    const taskId = event.dataTransfer.getData('text/task-id');
-    if (!taskId) return false;
-    store.update(taskId, {
-      sphere,
-      topic: path.length ? pathKey(path) : undefined,
-      unplanned: false,
-    });
-    return true;
-  };
-
-  /** `acceptTask` is true only on a page: tasks are filed to pages now, so a
-   *  category or folder must not swallow a dragged task. */
-  const rowDragProps = (payload: {
-    kind: 'category' | 'folder';
-    id: string;
-    name: string;
-    sphere: string;
-    parentPath: string[];
-    acceptTask?: boolean;
-  }) => ({
-    draggable: true,
-    onDragStart: (event: DragEvent) => {
-      dragRef.current = payload;
-      event.dataTransfer.effectAllowed = 'move';
-      event.dataTransfer.setData('text/node-id', payload.id);
-    },
-    onDragEnd: () => {
-      dragRef.current = null;
-      setOverNode(null);
-    },
-    onDragOver: (event: DragEvent) => {
-      if (event.dataTransfer.types.includes('text/task-id')) {
-        if (!payload.acceptTask) return;
-        event.preventDefault();
-        event.stopPropagation();
-        event.dataTransfer.dropEffect = 'move';
-        setOverNode(payload.id);
-        return;
-      }
-      const active = dragRef.current;
-      if (!active || active.id === payload.id || active.kind !== payload.kind) return;
-      if (
-        active.kind === 'folder'
-        && (active.sphere !== payload.sphere || pathKey(active.parentPath) !== pathKey(payload.parentPath))
-      ) return;
-      event.preventDefault();
-      event.stopPropagation();
-      event.dataTransfer.dropEffect = 'move';
-      setOverNode(payload.id);
-    },
-    onDragLeave: (event: DragEvent) => {
-      const rect = event.currentTarget.getBoundingClientRect();
-      const { clientX: x, clientY: y } = event;
-      if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) {
-        setOverNode((prev) => (prev === payload.id ? null : prev));
-      }
-    },
-    onDrop: (event: DragEvent) => {
-      event.preventDefault();
-      event.stopPropagation();
-      // The path is built from NAMES (tasks reference names), never from ids.
-      const path = payload.kind === 'category' ? [] : [...payload.parentPath, payload.name];
-      if (payload.acceptTask && dropTask(event, payload.sphere, path)) {
-        setOverNode(null);
-        return;
-      }
-      const active = dragRef.current;
-      if (active && active.kind === payload.kind && active.id !== payload.id) {
-        if (active.kind === 'category') {
-          setOverNode(null);
-          dragRef.current = null;
-          store.reorderSpheres(reorderIds(spheres, active.id, payload.id));
-          return;
-        }
-        if (active.sphere === payload.sphere) {
-          const siblings = (nodeAt(tree[payload.sphere]?.children ?? [], active.parentPath)?.children ?? [])
-            .map((node) => node.id);
-          store.reorderTopics(payload.sphere, reorderIds(siblings, active.id, payload.id), active.parentPath);
-        }
-      }
-      dragRef.current = null;
-      setOverNode(null);
-    },
-  });
-
-  const renderFolders = (sphere: string, nodes: TreeNode[], parentPath: string[], depth: number): ReactNode => (
-    <>
-      {nodes.map((node) => {
-        const path = [...parentPath, node.name];
-        const key = nodeKeyOf(sphere, path);
-        const note = node.kind === 'note';
-        const open = !note && !!expanded[key];
-        const active = sel.sphere === sphere && pathKey(sel.path) === pathKey(path);
-        const count = counts.byNode[key] ?? 0;
-        const can = !note && canNest(path);
-        return (
-          <div className="dash-node" key={node.id}>
-            <div
-              className={[
-                'dash-node-row',
-                'dash-folder-row',
-                active ? 'active' : '',
-                overNode === node.id ? 'drop' : '',
-              ].join(' ')}
-              style={{ paddingLeft: 4 + depth * 10 }}
-              onClick={() => select(sphere, path)}
-              {...rowDragProps({
-              kind: 'folder',
-              id: node.id,
-              name: node.name,
-              sphere,
-              parentPath,
-              acceptTask: note,
-            })}
+  const renderRow = (sphere: string, node: TreeNode, path: string[], depth: number): ReactNode => {
+    const key = `${sphere}${SEP}${pathKey(path)}`;
+    const isOpen = expanded.includes(key);
+    const stats = statsOf(sphere, path);
+    const cover = coverOf.get(key);
+    const active = sel.sphere === sphere && pathKey(sel.path) === pathKey(path);
+    const isPage = node.kind === 'note';
+    const toggle = () => setExpanded((list) => (isOpen ? list.filter((item) => item !== key) : [...list, key]));
+    return (
+      <div key={key} className="dsh-branch">
+        <div
+          className={`dsh-row${active ? ' is-active' : ''}${isPage ? ' is-page' : ''}`}
+          style={{ paddingLeft: `${8 + depth * 14}px` }}
+        >
+          {!isPage && (
+            <button
+              type="button"
+              className={`dsh-chev${node.children.length ? '' : ' is-idle'}`}
+              onClick={toggle}
+              aria-label={isOpen ? 'свернуть' : 'развернуть'}
             >
-              {note ? (
-                <span className="dash-note-glyph" aria-hidden>
-                  <svg width="11" height="12" viewBox="0 0 12 13">
-                    <path d="M2.5 1.5h4l3 3v7h-7z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-                    <path d="M6.5 1.5v3h3" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-                  </svg>
-                </span>
-              ) : node.children.length === 0 ? (
-                // No children yet → no arrow at all (the user's rule).
-                <span className="dash-chev-empty" aria-hidden />
-              ) : (
-                <button
-                  type="button"
-                  className={`dash-chev ${open ? 'open' : ''}`}
-                  onClick={(event) => { event.stopPropagation(); toggle(key); }}
-                  aria-label={open ? 'Свернуть' : 'Показать вложенные папки'}
-                  title={open ? 'Свернуть' : 'Вложенные папки'}
-                >
-                  <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-                    <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </button>
-              )}
-              <span className="dash-node-name">{node.name}</span>
-              {count > 0 && <span className="dash-node-count">{count}</span>}
-              {can && (
-                <button
-                  type="button"
-                  className="dash-node-plus"
-                  onClick={(event) => { event.stopPropagation(); startAdd(sphere, path); }}
-                  aria-label="Вложенная папка"
-                  title="Вложенная папка"
-                >+</button>
-              )}
-            </div>
-            {open && !note && node.children.length > 0 && renderFolders(sphere, node.children, path, depth + 1)}
-            {open && !note && adding && adding.sphere === sphere && pathKey(adding.path) === pathKey(path) && (
-              <input
-                autoFocus
-                className="dash-sub-input"
-                style={{ marginLeft: 8 + (depth + 1) * 10 }}
-                value={draftName}
-                placeholder="папка"
-                onChange={(event) => setDraftName(event.target.value)}
-                onBlur={commitAdd}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') commitAdd();
-                  if (event.key === 'Escape') { setAdding(null); setDraftName(''); }
-                }}
-              />
+              {node.children.length ? (isOpen ? '▾' : '▸') : '·'}
+            </button>
+          )}
+          {isPage && (
+            cover?.data
+              ? <span className="dsh-row-thumb" style={{ backgroundImage: `url(${cover.data})` }} />
+              : <span className="dsh-row-thumb is-empty">{stats.total ? `${stats.done}/${stats.total}` : '▤'}</span>
+          )}
+          <button
+            type="button"
+            className="dsh-row-name"
+            onClick={() => (isPage ? open(sphere, path) : toggle())}
+          >
+            {node.name}
+          </button>
+          {!isPage && stats.total > 0 && <span className="dsh-row-count">{stats.done}/{stats.total}</span>}
+        </div>
+        {!isPage && isOpen && (
+          <div className="dsh-children">
+            {node.children.map((child) => renderRow(sphere, child, [...path, child.name], depth + 1))}
+            {creating && creating.sphere === sphere && pathKey(creating.parent) === pathKey(path) && (
+              <div className="dsh-new-row" style={{ paddingLeft: `${8 + (depth + 1) * 14}px` }}>
+                <InlineInput
+                  placeholder={creating.kind === 'folder' ? 'название папки' : 'название страницы'}
+                  onSubmit={(value) => createNode(sphere, path, creating.kind, value)}
+                  onCancel={() => setCreating(null)}
+                />
+              </div>
             )}
           </div>
-        );
-      })}
-    </>
-  );
+        )}
+      </div>
+    );
+  };
 
-  const blockKinds: BlockKind[] = ['tasks', 'notes', 'moodboard'];
-  const missing = blockKinds.filter((kind) => !blocks.includes(kind));
-  const photo = (value: string | null) => nodePhotos.find((item) => item.id === value);
+  const treeBody = (
+    <>
+      <button type="button" className={`dsh-home-link${!sel.sphere ? ' is-active' : ''}`} onClick={goHome}>
+        <span className="dsh-home-dot" />
+        Дашборд
+      </button>
 
-  const renderBlocks = () => (
-            <div className="dash-blocks">
-              {blocks.map((kind) => {
-                if (kind === 'tasks') {
-                  return (
-                    <section className="dash-block dash-block-tasks" key="tasks">
-                      <BlockHead title="задачи" count={list.length} onRemove={() => removeBlock('tasks')} />
-                      <div
-                        className="sphere-tasks"
-                        onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }}
-                        onDrop={(event) => {
-                          event.preventDefault();
-                          dropTask(event, sel.sphere, sel.path);
-                        }}
-                      >
-                        {list.map((task) => (
-                          <TaskItem
-                            key={task.id}
-                            task={task}
-                            onEdit={() => onEdit(task)}
-                            onReorder={makeReorderInNode(tasks, sel.sphere, topicKey, list)}
-                          />
-                        ))}
-                        {addingTask ? (
-                          <QuickAdd sphere={sel.sphere} topic={topicKey} onDone={() => setAddingTask(false)} />
-                        ) : (
-                          <div className="add-line" onClick={() => setAddingTask(true)}>+ задача</div>
-                        )}
-                        {!list.length && !addingTask && (
-                          <div className="dash-hint-line">в этом месте пока нет задач</div>
-                        )}
-                      </div>
-                    </section>
-                  );
-                }
-                if (kind === 'notes') {
-                  return (
-                    <section className="dash-block dash-block-notes" key="notes">
-                      <BlockHead title="стикеры" count={nodeNotes.length} onRemove={() => removeBlock('notes')} />
-                      <div className="dash-note-new">
-                        <textarea
-                          value={noteDraft}
-                          placeholder="новая карточка — Enter, чтобы добавить"
-                          rows={2}
-                          onChange={(event) => setNoteDraft(event.target.value)}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' && !event.shiftKey) {
-                              event.preventDefault();
-                              submitNote();
-                            }
-                          }}
-                        />
-                        <button type="button" className="dash-note-add" onClick={submitNote} disabled={!noteDraft.trim()} aria-label="Добавить заметку">+</button>
-                      </div>
-                      <div className="dash-note-list">
-                        {nodeNotes.map((note) => (
-                          <NoteCard key={note.id} id={note.id} text={note.text} color={note.color} />
-                        ))}
-                        {!nodeNotes.length && <div className="dash-hint-line">заметки, которые жалко потерять</div>}
-                      </div>
-                    </section>
-                  );
-                }
-                return (
-                  <section className="dash-block dash-block-board" key="moodboard">
-                    <BlockHead
-                      title="мудборд"
-                      count={nodePhotos.length}
-                      onRemove={() => removeBlock('moodboard')}
-                      actions={(
-                        <>
-                          <label className="dash-board-add">
-                            <input
-                              type="file"
-                              accept="image/*"
-                              multiple
-                              onChange={(event) => {
-                                const files = event.currentTarget.files;
-                                void onFiles(files);
-                                event.currentTarget.value = '';
-                              }}
-                            />
-                            {uploading ? 'добавляю…' : '+ фото'}
-                          </label>
-                          <button type="button" className="dash-muted" onClick={() => void syncBoard()} title="Обновить мудборд и заметки">⟳</button>
-                        </>
-                      )}
-                    />
-                    {nodePhotos.length ? (
-                      <div className="dash-board-grid">
-                        {nodePhotos.map((item) => (
-                          <figure className="dash-photo" key={item.id}>
-                            <img src={item.data} alt={item.caption || 'фото мудборда'} onClick={() => setLightbox(item.id)} />
-                            <button type="button" className="dash-photo-del" onClick={() => removeBoardItem(item.id)} aria-label="Удалить фото" title="Удалить">×</button>
-                            <input
-                              className="dash-photo-caption"
-                              defaultValue={item.caption}
-                              placeholder="подпись"
-                              onBlur={(event) => updateBoardPhoto(item.id, { caption: event.currentTarget.value })}
-                              onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
-                            />
-                          </figure>
-                        ))}
-                      </div>
-                    ) : (
-                      <label className="dash-board-empty">
-                        <input
-                          type="file"
-                          accept="image/*"
-                          multiple
-                          onChange={(event) => {
-                            const files = event.currentTarget.files;
-                            void onFiles(files);
-                            event.currentTarget.value = '';
-                          }}
-                        />
-                        <span>здесь собираются картинки, которые тебе нравятся</span>
-                        <span className="dash-board-empty-cta">{uploading ? 'добавляю…' : '+ добавить фото'}</span>
-                      </label>
-                    )}
-                    {boardError && <div className="dash-board-status">{boardError}</div>}
-                  </section>
-                );
-              })}
-
-              {!blocks.length && (
-                <div className="dash-empty">
-                  <div className="dash-empty-title">пока здесь пусто</div>
-                  <div className="dash-empty-text">
-                    страница пустая — добавь блок: задачи, стикеры или мудборд.
-                  </div>
-                  <div className="dash-empty-actions">
-                    {blockKinds.map((kind) => (
-                      <button key={kind} type="button" className="dash-empty-btn" onClick={() => addBlock(kind)}>
-                        <span className="dash-empty-name">{BLOCK_LABEL[kind]}</span>
-                        <span className="dash-empty-hint">{BLOCK_HINT[kind]}</span>
-                      </button>
-                    ))}
-
-                  </div>
-                </div>
-              )}
-            </div>
-  );
-
-  return (
-    <div className="dashboard">
-      <aside className="dash-rail" aria-label="Категории и папки">
-        <div className="dash-rail-head">
-          <span>категории</span>
-          <button type="button" className="dash-rail-add" onClick={() => setCreatingCategory(true)} aria-label="Новая категория" title="Новая категория">+</button>
+      {query.trim() ? (
+        <div className="dsh-results">
+          {searchResults.length === 0 && <p className="dsh-muted">ничего не найдено</p>}
+          {searchResults.map((row) => (
+            <button
+              key={`${row.sphere}${SEP}${pathKey(row.path)}`}
+              type="button"
+              className="dsh-result"
+              onClick={() => (row.kind === 'category' ? openCategory(row.sphere) : open(row.sphere, row.path))}
+            >
+              <span className={`dsh-result-kind is-${row.kind}`}>
+                {row.kind === 'page' ? '▤' : row.kind === 'folder' ? '▸' : '◆'}
+              </span>
+              <span className="dsh-result-name">{row.label}</span>
+              <span className="dsh-result-crumb">
+                {row.path.length > 1 ? row.path.slice(0, -1).join(' / ') : row.sphere}
+              </span>
+            </button>
+          ))}
         </div>
-
-        <div className="dash-rail-list">
+      ) : (
+        <div className="dsh-tree">
           {spheres.map((sphere) => {
-            const open = !!expanded[nodeKeyOf(sphere, [])];
+            const category = tree[sphere];
+            const isOpen = expanded.includes(sphere);
+            const stats = statsOf(sphere, []);
             const active = sel.sphere === sphere && !sel.path.length;
-            const count = counts.bySphere[sphere] ?? 0;
             return (
-              <div className="dash-node" key={sphere}>
-                <div
-                  className={[
-                    'dash-node-row',
-                    active ? 'active' : '',
-                    overNode === sphere ? 'drop' : '',
-                  ].join(' ')}
-                  onClick={() => select(sphere, [])}
-                  {...rowDragProps({ kind: 'category', id: sphere, name: sphere, sphere, parentPath: [] })}
-                >
-                  {(tree[sphere]?.children.length ?? 0) > 0 ? (
-                    <button
-                      type="button"
-                      className={`dash-chev ${open ? 'open' : ''}`}
-                      onClick={(event) => { event.stopPropagation(); toggle(nodeKeyOf(sphere, [])); }}
-                      aria-label={open ? 'Свернуть папки' : 'Показать папки'}
-                      title={open ? 'Свернуть' : 'Папки'}
-                    >
-                      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-                        <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    </button>
-                  ) : (
-                    <span className="dash-chev-empty" aria-hidden />
-                  )}
-                  <span className="dash-node-name">{sphere}</span>
-                  {count > 0 && <span className="dash-node-count">{count}</span>}
-                  {canNest([]) && (
-                    <button
-                      type="button"
-                      className="dash-node-plus"
-                      onClick={(event) => { event.stopPropagation(); startAdd(sphere, []); }}
-                      aria-label="Папка в категории"
-                      title="Папка в категории"
-                    >+</button>
-                  )}
+              <div key={sphere} className="dsh-cat">
+                <div className={`dsh-row dsh-row-cat${active ? ' is-active' : ''}`}>
+                  <button
+                    type="button"
+                    className="dsh-chev"
+                    onClick={() => setExpanded((list) => (isOpen ? list.filter((item) => item !== sphere) : [...list, sphere]))}
+                    aria-label={isOpen ? 'свернуть' : 'развернуть'}
+                  >
+                    {(category?.children ?? []).length ? (isOpen ? '▾' : '▸') : '·'}
+                  </button>
+                  <button type="button" className="dsh-row-name" onClick={() => openCategory(sphere)}>
+                    {sphere}
+                  </button>
+                  {stats.total > 0 && <span className="dsh-row-count">{stats.done}/{stats.total}</span>}
                 </div>
-                {open && renderFolders(sphere, tree[sphere]?.children ?? [], [], 1)}
-                {open && adding && adding.sphere === sphere && !adding.path.length && (
-                  <input
-                    autoFocus
-                    className="dash-sub-input"
-                    value={draftName}
-                    placeholder="папка"
-                    onChange={(event) => setDraftName(event.target.value)}
-                    onBlur={commitAdd}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') commitAdd();
-                      if (event.key === 'Escape') { setAdding(null); setDraftName(''); }
-                    }}
-                  />
+                {isOpen && (
+                  <div className="dsh-children">
+                    {(category?.children ?? []).map((node) => renderRow(sphere, node, [node.name], 1))}
+                    {creating && creating.sphere === sphere && !creating.parent.length && (
+                      <div className="dsh-new-row" style={{ paddingLeft: '22px' }}>
+                        <InlineInput
+                          placeholder={creating.kind === 'folder' ? 'название папки' : 'название страницы'}
+                          onSubmit={(value) => createNode(sphere, [], creating.kind, value)}
+                          onCancel={() => setCreating(null)}
+                        />
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             );
           })}
-
-          {creatingCategory && (
-            <input
-              autoFocus
-              className="dash-rail-input"
-              value={newCategory}
-              placeholder="категория"
-              onChange={(event) => setNewCategory(event.target.value)}
-              onBlur={commitCategory}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') commitCategory();
-                if (event.key === 'Escape') { setNewCategory(''); setCreatingCategory(false); }
-              }}
-            />
-          )}
-
-          {!spheres.length && !creatingCategory && (
-            <button type="button" className="dash-rail-empty" onClick={() => setCreatingCategory(true)}>
-              пока пусто — создай первую категорию
-            </button>
+          {addingSphere && (
+            <div className="dsh-new-row">
+              <InlineInput
+                placeholder="название сферы"
+                onSubmit={(value) => {
+                  setAddingSphere(false);
+                  const name = value.trim();
+                  if (!name) return;
+                  store.addSphere(name);
+                  setExpanded((list) => Array.from(new Set([...list, name])));
+                  openCategory(name);
+                }}
+                onCancel={() => setAddingSphere(false)}
+              />
+            </div>
           )}
         </div>
+      )}
+    </>
+  );
 
-        <div className="dash-rail-hint">
-          категория держит папки, папка — страницы, а всё содержимое живёт
-          на странице. пункт страницы можно поставить в план на конкретный день.
+  const containerChildren = sel.path.length
+    ? nodeAt(tree[sel.sphere]?.children ?? [], sel.path)?.children ?? []
+    : tree[sel.sphere]?.children ?? [];
+
+  const stats = statsOf(sel.sphere, sel.path);
+  const cover = sel.sphere ? coverOf.get(nodeKeyOf(sel.sphere, sel.path)) : undefined;
+  const creatingHere = creating && creating.sphere === sel.sphere
+    && pathKey(creating.parent) === pathKey(sel.path)
+    ? creating.kind
+    : null;
+
+  const listCommon = {
+    sphere: sel.sphere,
+    basePath: sel.path,
+    statsOf: (path: string[]) => statsOf(sel.sphere, path),
+    coverOf: (path: string[]) => coverOf.get(nodeKeyOf(sel.sphere, path)),
+    onOpenPage: (path: string[]) => open(sel.sphere, path),
+    onOpenFolder: (path: string[]) => open(sel.sphere, path),
+    creating: creatingHere,
+    onCreate: (value: string) => createNode(sel.sphere, sel.path, creating?.kind ?? 'page', value),
+    onCancelCreate: () => setCreating(null),
+    onAddPage: () => setCreating({ sphere: sel.sphere, parent: sel.path, kind: 'page' }),
+    onAddFolder: () => setCreating({ sphere: sel.sphere, parent: sel.path, kind: 'folder' }),
+  };
+
+  return (
+    <div className="dsh">
+      <aside className="dsh-side" ref={sideRef}>
+        <div className="dsh-side-head">
+          <div className="dsh-side-title">сферы жизни</div>
+          <button type="button" className="dsh-side-add" title="новая сфера" onClick={() => setAddingSphere(true)}>＋</button>
+        </div>
+        <input
+          className="dsh-search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="искать страницу или текст…"
+        />
+        <div className="dsh-side-body">{treeBody}</div>
+        <div className="dsh-side-foot">
+          <button
+            type="button"
+            className="dsh-sync"
+            onClick={() => { void syncBoard(); setToast('обновляю заметки и фото…'); }}
+            title="обновить с сервера"
+          >
+            ⟳
+          </button>
+          <span>{allPages.length} стр. · {photos.length} фото</span>
         </div>
       </aside>
 
-      <div className="dash-main">
-        <section className="dash-page">
-          <header className="dash-page-head">
-            {sel.sphere ? (
-              <>
-                <div className="dash-crumbs">
-                  {renaming ? (
-                    <input
-                      autoFocus
-                      className="dash-rename"
-                      defaultValue={sel.path.length ? sel.path[sel.path.length - 1] : sel.sphere}
-                      onBlur={(event) => commitRename(event.currentTarget.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') event.currentTarget.blur();
-                        if (event.key === 'Escape') {
-                          event.currentTarget.value = sel.path.length ? sel.path[sel.path.length - 1] : sel.sphere;
-                          event.currentTarget.blur();
-                        }
-                      }}
-                    />
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        className="dash-crumb"
-                        onClick={() => (sel.path.length ? select(sel.sphere, []) : setRenaming(true))}
-                        title={sel.path.length ? 'К категории' : 'Переименовать категорию'}
-                      >
-                        {sel.sphere}
-                      </button>
-                      {sel.path.map((name, at) => {
-                        const path = sel.path.slice(0, at + 1);
-                        const last = at === sel.path.length - 1;
-                        return (
-                          <span className="dash-crumb-group" key={`${name}-${at}`}>
-                            <span className="dash-crumb-sep">/</span>
-                            <button
-                              type="button"
-                              className={`dash-crumb ${last ? 'last' : ''}`}
-                              onClick={() => (last ? setRenaming(true) : select(sel.sphere, path))}
-                              title={last ? 'Переименовать' : 'К этой папке'}
-                            >
-                              {name}
-                            </button>
-                          </span>
-                        );
-                      })}
-                    </>
-                  )}
-                </div>
+      <div className="dsh-main">
+        <div className="dsh-mobile-bar">
+          <button type="button" className="dsh-mobile-btn" onClick={() => setSheet(true)} aria-label="разделы">☰</button>
+          <button
+            type="button"
+            className="dsh-mobile-title"
+            onClick={() => {
+              if (sel.path.length > 1) setSel({ sphere: sel.sphere, path: sel.path.slice(0, -1) });
+              else if (sel.path.length === 1) openCategory(sel.sphere);
+              else if (sel.sphere) goHome();
+            }}
+          >
+            {sel.path.length ? '← назад' : sel.sphere || 'Дашборд'}
+          </button>
+          <button
+            type="button"
+            className="dsh-mobile-btn"
+            onClick={() => setSheet(true)}
+            aria-label="поиск"
+          >
+            ⌕
+          </button>
+        </div>
 
-                {isNote && <span className="dash-page-count">{list.length}</span>}
+        {sheet && (
+          <div className="dsh-sheet" role="dialog" aria-modal="true">
+            <div className="dsh-sheet-head">
+              <span>куда перейти</span>
+              <button type="button" className="dsh-mobile-btn" onClick={() => setSheet(false)}>×</button>
+            </div>
+            <input
+              className="dsh-search"
+              autoFocus
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="искать страницу или текст…"
+            />
+            <div className="dsh-side-body">{treeBody}</div>
+            <button type="button" className="dsh-sheet-add" onClick={() => setAddingSphere(true)}>＋ новая сфера</button>
+          </div>
+        )}
 
-                <div className="dash-page-actions">
-                  {isNote && missing.length > 0 && (
-                    <div className="dash-add-wrap">
-                      <button
-                        type="button"
-                        className="dash-add-block"
-                        onClick={() => setPaletteOpen((prev) => !prev)}
-                        aria-expanded={paletteOpen}
-                      >
-                        + блок
-                      </button>
-                      {paletteOpen && (
-                        <>
-                          <div className="dash-palette-backdrop" onClick={() => setPaletteOpen(false)} />
-                          <div className="dash-palette" role="menu">
-                            {missing.map((kind) => (
-                              <button
-                                key={kind}
-                                type="button"
-                                className="dash-palette-item"
-                                role="menuitem"
-                                onClick={() => addBlock(kind)}
-                              >
-                                <span className="dash-palette-name">{BLOCK_LABEL[kind]}</span>
-                                <span className="dash-palette-hint">{BLOCK_HINT[kind]}</span>
-                              </button>
-                            ))}
-                            {canNest(sel.path) && (
-                              <button
-                                type="button"
-                                className="dash-palette-item"
-                                role="menuitem"
-                                onClick={() => { setPaletteOpen(false); startAdd(sel.sphere, sel.path); }}
-                              >
-                                <span className="dash-palette-name">папка</span>
-                                <span className="dash-palette-hint">вложенная папка внутри этой</span>
-                              </button>
-                            )}
+        {!sel.sphere && (
+          <section className="dsh-home">
+            <header className="dsh-home-head">
+              <p className="dsh-home-date">{todayLabel()}</p>
+              <h1 className="dsh-home-title">{greeting()}</h1>
+            </header>
 
-                          </div>
-                        </>
-                      )}
+            <div className="dsh-stats">
+              <div className="dsh-stat"><b>{todayTasks.length}</b><span>в плане сегодня</span></div>
+              <div className="dsh-stat"><b>{weekTasks.length}</b><span>на неделю вперёд</span></div>
+              <div className="dsh-stat"><b>{overdueTasks.length}</b><span>просрочено</span></div>
+            </div>
+
+            <section className="dsh-panel">
+              <div className="dsh-panel-head">
+                <h2>сегодня</h2>
+                <span className="dsh-muted">{todayTasks.length ? 'отмечай по ходу дня' : 'ничего не запланировано'}</span>
+              </div>
+              {todayTasks.length > 0 && (
+                <div className="dsh-today-list">
+                  {todayTasks.slice(0, 8).map((task) => (
+                    <div key={task.id} className="dsh-today-row">
+                      <button type="button" className="dsh-check" onClick={() => store.toggleComplete(task.id)} aria-label="выполнено" />
+                      <button type="button" className="dsh-today-name" onClick={() => onEdit(task)}>{task.title}</button>
+                      {task.sphere && <span className="dsh-chip">{task.sphere}</span>}
                     </div>
-                  )}
+                  ))}
+                  {todayTasks.length > 8 && <p className="dsh-muted">и ещё {todayTasks.length - 8}…</p>}
+                </div>
+              )}
+            </section>
 
-                  {confirmDelete ? (
-                    <>
-                      <button type="button" className="dash-danger" onClick={deleteSelected}>
-                        {sel.path.length
-                          ? (isNote ? 'удалить страницу' : 'удалить папку')
-                          : 'удалить категорию'}
-                      </button>
-                      <button type="button" className="dash-cancel" onClick={() => setConfirmDelete(false)}>отмена</button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      className="dash-delete"
-                      onClick={() => setConfirmDelete(true)}
-                      title="Удалить"
-                      aria-label="Удалить"
-                    >
-                      <svg width="11" height="12" viewBox="0 0 12 13" aria-hidden>
-                        <path d="M1.5 3.2h9M4.2 3.2V1.6h3.6v1.6M2.9 3.2l.7 8.2h4.8l.7-8.2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                      удалить
+            {recent.length > 0 && (
+              <section className="dsh-panel">
+                <div className="dsh-panel-head"><h2>продолжить</h2></div>
+                <div className="dsh-recent">
+                  {recent.map(({ doc, sphere, path }) => (
+                    <button key={doc.id} type="button" className="dsh-recent-card" onClick={() => open(sphere, path)}>
+                      <span className="dsh-recent-kind">{circleFor(doc, path, sphere)}</span>
+                      <span className="dsh-recent-name">{path[path.length - 1]}</span>
+                      <span className="dsh-recent-crumb">
+                        {sphere}{path.length > 1 ? ` / ${path.slice(0, -1).join(' / ')}` : ''}
+                      </span>
                     </button>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            <section className="dsh-panel">
+              <div className="dsh-panel-head">
+                <h2>сферы</h2>
+                <button type="button" className="dsh-ghost" onClick={() => setAddingSphere(true)}>＋ сфера</button>
+              </div>
+              <div className="dsh-cards">
+                {spheres.map((sphere) => {
+                  const st = statsOf(sphere, []);
+                  const pic = coverOf.get(`${sphere}${SEP}`);
+                  return (
+                    <button key={sphere} type="button" className="dsh-card" onClick={() => openCategory(sphere)}>
+                      <span
+                        className={`dsh-card-cover${pic?.data ? '' : ' is-empty'}`}
+                        style={pic?.data ? { backgroundImage: `url(${pic.data})` } : undefined}
+                      >
+                        {!pic?.data && <span>{(sphere[0] ?? '?').toUpperCase()}</span>}
+                      </span>
+                      <span className="dsh-card-body">
+                        <span className="dsh-card-name">{sphere}</span>
+                        <span className="dsh-card-meta">
+                          {st.pages ? `${st.pages} стр.` : 'пусто'}
+                          {st.total ? ` · ${st.done}/${st.total}` : ''}
+                        </span>
+                        <Progress stats={st} />
+                      </span>
+                    </button>
+                  );
+                })}
+                <button type="button" className="dsh-card dsh-card-add" onClick={() => setAddingSphere(true)}>
+                  <span className="dsh-card-cover is-empty">＋</span>
+                  <span className="dsh-card-body">
+                    <span className="dsh-card-name">новая сфера</span>
+                    <span className="dsh-card-meta">например «здоровье»</span>
+                  </span>
+                </button>
+              </div>
+            </section>
+          </section>
+        )}
+
+        {sel.sphere && !sel.path.length && (
+          <section className="dsh-section">
+            <header
+              className={`dsh-sec-head${cover?.data ? ' has-cover' : ''}`}
+              style={cover?.data ? { backgroundImage: `url(${cover.data})` } : undefined}
+            >
+              <div className="dsh-sec-veil">
+                <input
+                  className="dsh-sec-title"
+                  key={sel.sphere}
+                  defaultValue={sel.sphere}
+                  onBlur={(event) => {
+                    const next = event.target.value.trim();
+                    if (next && next !== sel.sphere) {
+                      store.renameSphere(sel.sphere, next);
+                      rekeyNode(nodeKeyOf(sel.sphere, []), nodeKeyOf(next, []));
+                      setSel({ sphere: next, path: [] });
+                    } else {
+                      event.target.value = sel.sphere;
+                    }
+                  }}
+                  onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+                  aria-label="название сферы"
+                />
+                <div className="dsh-sec-meta">
+                  <Progress stats={stats} />
+                  {stats.total > 0 && (
+                    <span>{stats.done} из {stats.total} пунктов · {stats.planned} в плане</span>
                   )}
                 </div>
-              </>
-            ) : (
-              <span className="dash-panel-title">дашборд</span>
-            )}
-          </header>
+              </div>
+            </header>
 
-          {sel.sphere ? (
-            isNote ? (
-              noteDoc ? (
+            <div className="dsh-sec-actions">
+              <button type="button" className="dsh-cta" onClick={() => setCreating({ sphere: sel.sphere, parent: [], kind: 'page' })}>
+                ＋ страница
+              </button>
+              <button type="button" className="dsh-cta is-quiet" onClick={() => setCreating({ sphere: sel.sphere, parent: [], kind: 'folder' })}>
+                ＋ папка
+              </button>
+              <span className="dsh-spacer" />
+              {confirmKey === `cat:${sel.sphere}` ? (
                 <>
-                <NoteEditor
-                  key={noteDoc.id}
-                  doc={noteDoc}
-                  sphere={sel.sphere}
-                  topic={pathKey(sel.path)}
-                  onTitleChange={commitRename}
-                />
-                {renderBlocks()}
+                  <button type="button" className="dsh-danger" onClick={() => { removeNode(sel.sphere, []); setConfirmKey(''); }}>
+                    удалить сферу и всё внутри
+                  </button>
+                  <button type="button" className="dsh-ghost" onClick={() => setConfirmKey('')}>отмена</button>
                 </>
               ) : (
-                <div className="dash-hint-line">
-                  эта страница не найдена — возможно, её удалили на другом устройстве
-                </div>
-              )
-            ) : (
-              <div className="dash-container">
-                <div className="dash-container-text">
-                  {sel.path.length
-                    ? 'в папке ничего не пишется: она только держит страницы'
-                    : 'категория держит только папки — всё содержимое живёт на страницах'}
-                </div>
-                <div className="dash-container-actions">
-                  {canNest(sel.path) && (
-                    <button type="button" className="dash-primary" onClick={() => startAdd(sel.sphere, sel.path)}>
-                      + папка
-                    </button>
-                  )}
-                  {canPage(sel.path) && (
-                    <button type="button" className="dash-primary" onClick={() => startAdd(sel.sphere, sel.path, 'note')}>
-                      + страница
-                    </button>
-                  )}
-                </div>
-                {(sel.path.length ? (current?.children ?? []) : (category?.children ?? [])).length > 0 ? (
-                  <div className="dash-children">
-                    {(sel.path.length ? (current?.children ?? []) : (category?.children ?? [])).map((child) => (
-                      <button
-                        type="button"
-                        className="dash-child"
-                        key={child.id}
-                        onClick={() => select(sel.sphere, [...sel.path, child.name])}
-                      >
-                        <span className={`dash-child-icon ${child.kind}`} aria-hidden>
-                          {child.kind === 'note' ? '▤' : '▸'}
-                        </span>
-                        <span className="dash-child-name">{child.name}</span>
-                        <span className="dash-child-kind">{child.kind === 'note' ? 'страница' : 'папка'}</span>
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="dash-container-empty">пока пусто — создай первую</div>
-                )}
-              </div>
-            )
-          ) : (
-            <div className="dash-hint-line">создай категорию слева — внутри неё собираются блоки</div>
-          )}
-        </section>
-      </div>
+                <button type="button" className="dsh-ghost" onClick={() => setConfirmKey(`cat:${sel.sphere}`)}>удалить</button>
+              )}
+            </div>
 
-      {lightbox && photo(lightbox) && (
-        <div className="dash-lightbox" onClick={() => setLightbox(null)} role="dialog" aria-label="Фото мудборда">
-          <img src={photo(lightbox)!.data} alt={photo(lightbox)!.caption || 'фото мудборда'} />
-          {photo(lightbox)!.caption && <div className="dash-lightbox-caption">{photo(lightbox)!.caption}</div>}
-          <button type="button" className="dash-lightbox-close" onClick={() => setLightbox(null)} aria-label="Закрыть">×</button>
+            {unfiledBanner}
+
+            <ContainerList
+              {...listCommon}
+              items={containerChildren}
+              empty="Пока пусто. Создай страницу — например «Здоровье: цель на год» — и напиши в ней, чего хочешь и какими шагами."
+            />
+          </section>
+        )}
+
+        {sel.sphere && sel.path.length > 0 && selectedNode?.kind === 'folder' && (
+          <section className="dsh-section">
+            <nav className="dsh-crumbs">
+              <button type="button" className="dsh-crumb" onClick={() => openCategory(sel.sphere)}>{sel.sphere}</button>
+              {sel.path.slice(0, -1).map((name, index) => (
+                <button key={name} type="button" className="dsh-crumb" onClick={() => open(sel.sphere, sel.path.slice(0, index + 1))}>
+                  {name}
+                </button>
+              ))}
+              <span className="dsh-crumb is-here">{sel.path[sel.path.length - 1]}</span>
+            </nav>
+
+            <header className="dsh-folder-head">
+              <h1 className="dsh-folder-title">{sel.path[sel.path.length - 1]}</h1>
+              <Progress stats={stats} />
+            </header>
+
+            <div className="dsh-sec-actions">
+              {canAddPage(sel.path) && (
+                <button type="button" className="dsh-cta" onClick={() => setCreating({ sphere: sel.sphere, parent: sel.path, kind: 'page' })}>
+                  ＋ страница
+                </button>
+              )}
+              {canAddChild(sel.path) && (
+                <button type="button" className="dsh-cta is-quiet" onClick={() => setCreating({ sphere: sel.sphere, parent: sel.path, kind: 'folder' })}>
+                  ＋ папка
+                </button>
+              )}
+              <span className="dsh-spacer" />
+              {confirmKey === `node:${pathKey(sel.path)}` ? (
+                <>
+                  <button type="button" className="dsh-danger" onClick={() => { removeNode(sel.sphere, sel.path); setConfirmKey(''); }}>
+                    удалить папку
+                  </button>
+                  <button type="button" className="dsh-ghost" onClick={() => setConfirmKey('')}>отмена</button>
+                </>
+              ) : (
+                <button type="button" className="dsh-ghost" onClick={() => setConfirmKey(`node:${pathKey(sel.path)}`)}>удалить</button>
+              )}
+            </div>
+
+            {unfiledBanner}
+
+            <ContainerList
+              {...listCommon}
+              items={containerChildren}
+              empty="В папке пока нет страниц. Добавь страницу — и пиши в ней план."
+            />
+          </section>
+        )}
+
+        {sel.sphere && sel.path.length > 0 && selectedNode?.kind === 'note' && pageDoc && (
+          <section className="dsh-section dsh-section-page">
+            <nav className="dsh-crumbs">
+              <button
+                type="button"
+                className="dsh-crumb dsh-crumb-back"
+                title={sel.path.length > 1 ? sel.path[sel.path.length - 2] : sel.sphere}
+                onClick={() => (sel.path.length > 1 ? open(sel.sphere, sel.path.slice(0, -1)) : openCategory(sel.sphere))}
+              >
+                ←
+              </button>
+              <button type="button" className="dsh-crumb" onClick={() => openCategory(sel.sphere)}>{sel.sphere}</button>
+              {sel.path.slice(0, -1).map((name, index) => (
+                <button
+                  key={name}
+                  type="button"
+                  className="dsh-crumb"
+                  onClick={() => open(sel.sphere, sel.path.slice(0, index + 1))}
+                >
+                  · {name}
+                </button>
+              ))}
+              <span className="dsh-crumb is-here">{sel.path[sel.path.length - 1]}</span>
+            </nav>
+            <PageView
+              sphere={sel.sphere}
+              path={sel.path}
+              doc={pageDoc}
+              photos={pagePhotos}
+              onRename={(name) => renameNode(sel.sphere, sel.path, name)}
+              onDelete={() => {
+                if (!pageConfirm) {
+                  setPageConfirm(true);
+                  setToast('нажми 🗑 ещё раз, чтобы удалить страницу');
+                  window.setTimeout(() => setPageConfirm(false), 4000);
+                  return;
+                }
+                setPageConfirm(false);
+                removeNode(sel.sphere, sel.path);
+                setToast('страница удалена');
+              }}
+            />
+          </section>
+        )}
+
+        {toast && <div className="dsh-toast">{toast}</div>}
+      </div>
+    </div>
+  );
+}
+
+function circleFor(doc: BoardDoc, path: string[], sphere: string): string {
+  const counts = checkCounts(doc.md ?? '');
+  if (counts.total) return `${counts.done}/${counts.total}`;
+  return (path[path.length - 1] ?? sphere).slice(0, 1).toUpperCase();
+}
+
+function ContainerList({
+  items,
+  basePath,
+  statsOf,
+  coverOf,
+  onOpenPage,
+  onOpenFolder,
+  creating,
+  onCreate,
+  onCancelCreate,
+  onAddPage,
+  onAddFolder,
+  empty,
+}: {
+  sphere: string;
+  basePath: string[];
+  items: TreeNode[];
+  statsOf: (path: string[]) => Stats;
+  coverOf: (path: string[]) => BoardPhoto | undefined;
+  onOpenPage: (path: string[]) => void;
+  onOpenFolder: (path: string[]) => void;
+  creating: 'folder' | 'page' | null;
+  onCreate: (value: string) => void;
+  onCancelCreate: () => void;
+  onAddPage: () => void;
+  onAddFolder: () => void;
+  empty: string;
+}) {
+  if (!items.length && !creating) {
+    return (
+      <div className="dsh-list-empty">
+        <p className="dsh-empty">{empty}</p>
+        <div className="dsh-sec-actions">
+          <button type="button" className="dsh-cta" onClick={onAddPage}>＋ страница</button>
+          <button type="button" className="dsh-cta is-quiet" onClick={onAddFolder}>＋ папка</button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="dsh-list" data-creating={String(creating)}>
+      {creating && (
+        <div className="dsh-new-row">
+          <InlineInput
+            placeholder={creating === 'folder' ? 'название папки' : 'название страницы'}
+            onSubmit={onCreate}
+            onCancel={onCancelCreate}
+          />
         </div>
       )}
+      {items.map((node) => {
+        const path = [...basePath, node.name];
+        const isPage = node.kind === 'note';
+        const pic = coverOf(path);
+        const stats = statsOf(path);
+        return (
+          <button
+            key={node.id}
+            type="button"
+            className="dsh-item"
+            onClick={() => (isPage ? onOpenPage(path) : onOpenFolder(path))}
+          >
+            {pic?.data ? (
+              <span className="dsh-item-thumb" style={{ backgroundImage: `url(${pic.data})` }} />
+            ) : (
+              <span className={`dsh-item-thumb is-empty${isPage ? ' is-page' : ''}`}>{isPage ? '▤' : '▸'}</span>
+            )}
+            <span className="dsh-item-body">
+              <span className="dsh-item-name">{node.name}</span>
+              <span className="dsh-item-meta">
+                {isPage
+                  ? (stats.total ? `${stats.done} из ${stats.total} пунктов` : 'пустая страница')
+                  : `${node.children.filter((child) => child.kind === 'note').length} стр.`}
+              </span>
+              <Progress stats={stats} />
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }

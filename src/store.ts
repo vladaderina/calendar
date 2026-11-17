@@ -2471,6 +2471,16 @@ export const store = {
     );
     emit();
   },
+  /** Attach a document to an existing page node (a node created before note
+   *  files existed, or one restored without its id). */
+  setNoteId(sphere: string, path: string[], noteId: string) {
+    if (!spheres.includes(sphere) || !path.length || !noteId) return;
+    const category = topics[sphere] ?? emptyCategory();
+    if (!nodeAt(category.children, path)) return;
+    const children = mapNode(category.children, path, (node) => ({ ...node, noteId }));
+    topics = { ...topics, [sphere]: { ...category, children } };
+    emit();
+  },
   /** Which blocks a node shows; `path = []` is the category itself. */
   setBlocks(sphere: string, path: string[], blocks: BlockKind[]) {
     if (!spheres.includes(sphere)) return;
@@ -2496,6 +2506,9 @@ export const store = {
     localStorage.removeItem(JOURNAL_KEY);
     localStorage.setItem(VIEW_KEY, lastView);
     emit();
+  },
+  getSpheres(): string[] {
+    return spheres;
   },
   getTasks(): Task[] {
     return tasks;
