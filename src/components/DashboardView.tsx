@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent, ReactNode } from 'react';
 import type { Task } from '../types';
 import { TaskItem } from './TaskItem';
-import { store, useSpheres, useTasks, useTopics } from '../store';
+import { retryLocalPersist, store, useSpheres, useTasks, useTopics } from '../store';
 import { sortByPriority } from '../utils/date';
 import {
   BLOCK_HINT,
@@ -31,13 +31,14 @@ import {
   syncBoard,
   updateBoardNote,
   updateBoardPhoto,
+  hydrateBoard,
   useBoardDocs,
   useBoardNotes,
   useBoardPhotos,
 } from '../lib/board';
 import { NoteEditor } from './NoteEditor';
 import { fileToDataUrl } from '../lib/image';
-import { migrateBlocksToPages } from '../lib/migrate';
+import { upgradeDashboardModel } from '../lib/migrate';
 
 interface Props {
   onEdit: (task: Task) => void;
@@ -228,10 +229,19 @@ export function DashboardView({ onEdit }: Props) {
   }, [spheres]);
 
   // Old categories/folders kept blocks of their own; containers hold nothing
-  // now, so those blocks move into a «страница» child exactly once.
+  // now, so those blocks move into a «страница» child. Runs once the picture
+  // bytes have been moved out of localStorage (otherwise the writes hit the
+  // quota) and again whenever the task list grows — a task that arrives from
+  // the server without a page would be invisible.
   useEffect(() => {
-    migrateBlocksToPages();
-  }, []);
+    let cancelled = false;
+    void hydrateBoard().then(() => {
+      if (cancelled) return;
+      retryLocalPersist();
+      upgradeDashboardModel();
+    });
+    return () => { cancelled = true; };
+  }, [tasks.length, spheres.length]);
 
   // Keep the selection valid when categories/folders vanish (deleted here or
   // on the other device).

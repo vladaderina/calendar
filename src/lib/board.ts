@@ -20,6 +20,7 @@ import { useSyncExternalStore } from 'react';
 import { v4 as uuid } from 'uuid';
 import { supabase } from './supabase';
 import { getUserId } from './auth';
+import { idbDelete, idbGet, idbPut } from './idb';
 
 const KEY = 'calendar.board.v1';
 const EVENT = 'calendar-board-change';
@@ -31,8 +32,14 @@ export const NOTE_COLORS = ['#fef3c7', '#dbeafe', '#fce7f3', '#dcfce7', '#ede9fe
 export interface BoardPhoto {
   id: string;
   kind: 'photo';
-  /** `data:image/...` — already downscaled, see `lib/image.ts`. */
+  /** `data:image/...` — already downscaled, see `lib/image.ts`. In memory it
+   *  always holds the bytes; in localStorage it may be empty once the bytes
+   *  have been offloaded to IndexedDB. */
   data: string;
+  /** The bytes live in IndexedDB (see `lib/idb.ts`), localStorage holds the
+   *  metadata only — otherwise a few pictures fill the 5 MB quota and saving a
+   *  TASK throws QuotaExceededError. */
+  stored?: boolean;
   caption: string;
   /** Which dashboard node (category/folder) this picture belongs to. */
   nodeKey: string;
@@ -114,12 +121,15 @@ function sanitize(id: string, value: unknown): BoardItem | null {
   const deleted = src.deleted === true ? true : undefined;
   if (src.kind === 'photo') {
     const data = typeof src.data === 'string' && src.data.startsWith('data:image/') ? src.data : '';
+    const offloaded = src.stored === true;
     // A tombstone keeps no picture bytes — it only has to say "this is gone".
-    if (!data && !deleted) return null;
+    if (!data && !deleted && !offloaded) return null;
+    const stored = src.stored === true ? true : undefined;
     return {
       id,
       kind: 'photo',
       data: deleted ? '' : data,
+      stored: deleted ? undefined : stored,
       caption: typeof src.caption === 'string' ? src.caption : '',
       nodeKey: typeof src.nodeKey === 'string' ? src.nodeKey : '',
       born: Number(src.born) || t,
@@ -198,10 +208,22 @@ function subscribe(listener: () => void): () => void {
   return () => window.removeEventListener(EVENT, listener);
 }
 
+/** The localStorage copy: bytes that already live in IndexedDB are dropped, so
+ *  the 5 MB quota stays free for tasks and settings. */
+function serialize(): string {
+  const out: Record<string, BoardItem> = {};
+  for (const [id, item] of Object.entries(items)) {
+    out[id] = item.kind === 'photo' && item.stored && !item.deleted
+      ? { ...item, data: '' }
+      : item;
+  }
+  return JSON.stringify(out);
+}
+
 function persist(nudge = true): void {
   rebuild();
   try {
-    localStorage.setItem(KEY, JSON.stringify(items));
+    localStorage.setItem(KEY, serialize());
   } catch {
     // quota exceeded — surfaced by the caller that tried to add a photo
   }
@@ -213,11 +235,45 @@ function persist(nudge = true): void {
 /** True when `persist` could actually write the whole map (photo quota). */
 function storeFits(): boolean {
   try {
-    localStorage.setItem(KEY, JSON.stringify(items));
+    localStorage.setItem(KEY, serialize());
     return true;
   } catch {
     return false;
   }
+}
+
+let hydrating: Promise<void> | null = null;
+
+/** Read offloaded picture bytes back into memory, and push the bytes still
+ *  sitting in localStorage into IndexedDB (which frees the quota that broke
+ *  task saving). Runs once per page load and after every photo add. */
+export function hydrateBoard(): Promise<void> {
+  if (typeof window === 'undefined') return Promise.resolve();
+  if (hydrating) return hydrating;
+  hydrating = (async () => {
+    let changed = false;
+    for (const item of Object.values(items)) {
+      if (item.kind !== 'photo' || item.deleted) continue;
+      if (item.stored && !item.data) {
+        const data = await idbGet(item.id);
+        if (data) {
+          items[item.id] = { ...item, data };
+          changed = true;
+        }
+        continue;
+      }
+      if (!item.stored && item.data) {
+        const ok = await idbPut(item.id, item.data);
+        if (ok) {
+          items[item.id] = { ...item, stored: true };
+          changed = true;
+        }
+      }
+    }
+    if (changed) persist(false);
+    hydrating = null;
+  })();
+  return hydrating;
 }
 
 export function useBoardPhotos(): BoardPhoto[] {
@@ -247,13 +303,21 @@ export type AddResult = { ok: true } | { ok: false; message: string };
 export function addBoardPhoto(data: string, caption = '', nodeKey = ''): AddResult {
   const id = uuid();
   const now = Date.now();
-  items[id] = { id, kind: 'photo', data, caption, nodeKey, born: now, t: now };
-  if (!storeFits()) {
-    delete items[id];
-    rebuild();
-    return { ok: false, message: 'на устройстве кончилось место — удали пару фото' };
-  }
+  // Bytes go to IndexedDB; localStorage only keeps the metadata.
+  items[id] = { id, kind: 'photo', data, caption, nodeKey, born: now, t: now, stored: true };
   persist();
+  void idbPut(id, data).then((ok) => {
+    if (ok) return;
+    // No IndexedDB: fall back to keeping the picture in localStorage if it fits.
+    const cur = items[id];
+    if (!cur || cur.kind !== 'photo' || cur.deleted) return;
+    items[id] = { ...cur, stored: undefined };
+    if (!storeFits()) {
+      removeBoardItem(id);
+      return;
+    }
+    persist();
+  });
   return { ok: true };
 }
 
@@ -347,6 +411,32 @@ export function flushBoard(): void {
   persist();
 }
 
+/** How many stickers and pictures sit under a node key (documents excluded). */
+export function attachmentCounts(nodeKey: string): { photos: number; notes: number } {
+  const out = { photos: 0, notes: 0 };
+  if (!nodeKey) return out;
+  const prefix = nodeKey.endsWith('\u001F') ? nodeKey : `${nodeKey}\u001F`;
+  for (const item of Object.values(items)) {
+    if (item.deleted || !item.nodeKey) continue;
+    if (item.nodeKey !== nodeKey && !item.nodeKey.startsWith(prefix)) continue;
+    if (item.kind === 'photo') out.photos++;
+    else if (item.kind === 'note') out.notes++;
+  }
+  return out;
+}
+
+/** Stickers/pictures under a key. Note-documents do NOT count: every page has a
+ *  document of its own, so "is anything here?" would otherwise always answer yes
+ *  for a page (and for any folder that contains one). */
+export function attachmentsUnder(nodeKey: string): boolean {
+  if (!nodeKey) return false;
+  const prefix = nodeKey.endsWith('\u001F') ? nodeKey : `${nodeKey}\u001F`;
+  return Object.values(items).some((item) => !item.deleted
+    && (item.kind === 'photo' || item.kind === 'note')
+    && !!item.nodeKey
+    && (item.nodeKey === nodeKey || item.nodeKey.startsWith(prefix)));
+}
+
 /** Does any sticker/picture/page-document live under this node key? */
 export function itemsUnderKey(nodeKey: string): boolean {
   if (!nodeKey) return false;
@@ -377,7 +467,8 @@ export function removeBoardItem(id: string): void {
   const cur = items[id];
   if (!cur) return;
   if (cur.kind === 'photo') {
-    items[id] = { ...cur, data: '', deleted: true, t: Date.now() };
+    items[id] = { ...cur, data: '', stored: undefined, deleted: true, t: Date.now() };
+    void idbDelete(id);
   } else if (cur.kind === 'doc') {
     items[id] = { ...cur, blocks: [], deleted: true, t: Date.now() };
   } else {
@@ -523,6 +614,9 @@ async function runSync(): Promise<void> {
   if (adopted) persist(false);
 
   const dirty = Object.values(items).filter((item) => {
+    // A stored picture whose bytes have not been read back yet must not be
+    // uploaded empty: the other device would sanitize it away.
+    if (item.kind === 'photo' && !item.deleted && !item.data) return false;
     const remote = remoteT.get(item.id);
     return remote === undefined || item.t > remote;
   });
@@ -572,6 +666,7 @@ export function startBoardSync(): () => void {
   window.addEventListener('online', onVisible);
   document.addEventListener('visibilitychange', onVisible);
   const interval = window.setInterval(onVisible, 60_000);
+  void hydrateBoard();
   void syncBoard();
   return () => {
     window.clearTimeout(timer);

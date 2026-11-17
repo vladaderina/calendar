@@ -233,6 +233,27 @@ const SYNC_DEBOUNCE_MS = 40;
 // How often the fallback poll checks the server when realtime is silent.
 
 
+/** localStorage can be FULL (the moodboard pictures used to live there). A
+ *  failed cache write must never throw into React and kill the page: the data
+ *  is still in memory and on the server. */
+function saveLocal(key: string, value: string): boolean {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Write the in-memory state again — called once the picture bytes have been
+ *  moved out of localStorage and the quota is free. */
+export function retryLocalPersist(): void {
+  saveLocal(TASKS_KEY, JSON.stringify(tasks));
+  saveLocal(SPHERES_KEY, JSON.stringify(spheres));
+  saveLocal(TOPICS_KEY, JSON.stringify(topics));
+  saveLocal(VIEW_KEY, lastView);
+}
+
 function emit() {
   // Never let a task's sub-category exist without its tab (see
   // restoreTopicsFromTasks): a task whose topic has no tab is invisible on the
@@ -256,11 +277,11 @@ function emit() {
   snapshot.topics = topics;
   snapshot.journal = journal;
   snapshot.lastView = lastView;
-  localStorage.setItem(TASKS_KEY, JSON.stringify(tasks));
-  localStorage.setItem(SPHERES_KEY, JSON.stringify(spheres));
-  localStorage.setItem(TOPICS_KEY, JSON.stringify(topics));
-  localStorage.setItem(JOURNAL_KEY, JSON.stringify(journal));
-  localStorage.setItem(VIEW_KEY, lastView);
+  saveLocal(TASKS_KEY, JSON.stringify(tasks));
+  saveLocal(SPHERES_KEY, JSON.stringify(spheres));
+  saveLocal(TOPICS_KEY, JSON.stringify(topics));
+  saveLocal(JOURNAL_KEY, JSON.stringify(journal));
+  saveLocal(VIEW_KEY, lastView);
   // Journal / spheres / view are diffed against the server-confirmed shadows
   // in flushPending; nudge a flush only when one of them actually moved.
   if (
@@ -437,7 +458,7 @@ async function applyRemoteTasks(rows: any[], userId: string): Promise<void> {
   restoreTopicsFromTasks();
   if (JSON.stringify(topics) !== topicsBeforeRestore) {
     snapshot.topics = topics;
-    localStorage.setItem(TOPICS_KEY, JSON.stringify(topics));
+    saveLocal(TOPICS_KEY, JSON.stringify(topics));
     scheduleSync();
   }
   localStorage.setItem(TASKS_KEY, JSON.stringify(tasks));
@@ -1954,7 +1975,7 @@ function subscribeRealtime(userId: string) {
         }
         prevTaskSnapshot = new Map(tasks.map((t) => [t.id, t]));
         snapshot.tasks = tasks;
-        localStorage.setItem(TASKS_KEY, JSON.stringify(tasks));
+        saveLocal(TASKS_KEY, JSON.stringify(tasks));
         listeners.forEach((l) => l());
       },
     )
