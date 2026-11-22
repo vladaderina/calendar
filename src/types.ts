@@ -57,7 +57,7 @@ export interface Task {
   createdAt: string;
 }
 
-export type View = 'dashboard' | 'day' | 'week' | 'month' | 'year' | 'wheel' | 'planned' | 'analytics';
+export type View = 'day' | 'week' | 'month' | 'year' | 'wheel' | 'planned' | 'analytics';
 
 /** Name of the implicit topic every category has and cannot delete. */
 export const DEFAULT_TOPIC = 'Основное';

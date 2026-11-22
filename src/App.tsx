@@ -8,7 +8,6 @@ import { MonthView } from './components/MonthView';
 import { DayView } from './components/DayView';
 import { YearView } from './components/YearView';
 import { YearWheelView } from './components/YearWheelView';
-import { DashboardView } from './components/DashboardView';
 import { PlannedListView } from './components/PlannedListView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { store, useLastView, useSyncStatus, syncNow } from './store';
@@ -22,14 +21,6 @@ import { signOut, getCurrentUser } from './lib/auth';
 import { useUpdateAvailable } from './lib/updateCheck';
 
 // Inline SVG icons for the top nav.
-const DashboardIcon = () => (
-  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <rect x="3" y="3" width="7" height="7" rx="1.3" />
-    <rect x="14" y="3" width="7" height="7" rx="1.3" />
-    <rect x="3" y="14" width="7" height="7" rx="1.3" />
-    <rect x="14" y="14" width="7" height="7" rx="1.3" />
-  </svg>
-);
 const MonthViewIcon = () => (
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
     <path d="M3 5h18" />
@@ -93,7 +84,9 @@ const LogoutIcon = () => (
 
 function AppContent() {
   // View comes from the store (persisted in localStorage + Supabase)
-  const view = useLastView() as View;
+  // The dashboard section is removed; an old saved value falls back to week.
+  const savedView = useLastView();
+  const view = (savedView === 'dashboard' ? 'week' : savedView) as View;
   const updateAvailable = useUpdateAvailable();
   const accountEmail = getCurrentUser()?.email ?? '';
   const setViewPersisted = (next: View) => {
@@ -151,7 +144,6 @@ function AppContent() {
 
   const title = (() => {
     switch (view) {
-      case 'dashboard': return 'ДАШБОРД';
       case 'day': return 'ДЕНЬ';
       case 'week': return 'НЕДЕЛЯ';
       case 'month': return 'МЕСЯЦ';
@@ -247,14 +239,6 @@ function AppContent() {
 
           <div className="view-switcher-fixed" role="group" aria-label="Переключить вид">
             <button
-              className={`view-switcher-btn ${view === 'dashboard' ? 'active' : ''}`}
-              onClick={() => setViewPersisted('dashboard')}
-              title="Дашборд"
-              aria-label="Дашборд"
-            >
-              <DashboardIcon />
-            </button>
-            <button
               className={`view-switcher-btn ${view === 'week' ? 'active' : ''}`}
               onClick={() => setViewPersisted('week')}
               title="Неделя"
@@ -297,12 +281,6 @@ function AppContent() {
             >
               <CheckSquareIcon active={showCompleted} />
             </button>
-            {view === 'dashboard' && (
-              <>
-                <button className="today-btn desktop-only" onClick={handleTodayClick}>сегодня</button>
-                <button className="nav-btn-search" onClick={() => setShowSearchModal(true)} title="Поиск" aria-label="Поиск"><SearchIcon /></button>
-              </>
-            )}
             {view === 'planned' && (
               <>
                 <button className="today-btn desktop-only" onClick={handleTodayClick}>сегодня</button>
@@ -314,7 +292,7 @@ function AppContent() {
                 <button className="nav-btn-search" onClick={() => setShowSearchModal(true)} title="Поиск" aria-label="Поиск"><SearchIcon /></button>
               </>
             )}
-            {view !== 'dashboard' && view !== 'planned' && view !== 'analytics' && view !== 'wheel' && (
+            {view !== 'planned' && view !== 'analytics' && view !== 'wheel' && (
               <>
                 <button className="today-btn desktop-only" onClick={handleTodayClick}>сегодня</button>
                 <button className="nav-btn-search" onClick={() => setShowSearchModal(true)} title="Поиск" aria-label="Поиск"><SearchIcon /></button>
@@ -373,7 +351,6 @@ function AppContent() {
         )}
 
         <div className="content">
-          {view === 'dashboard' && <DashboardView onEdit={openEdit} />}
           {view === 'day' && <DayView anchor={anchor} onEdit={openEdit} />}
           {view === 'week' && <WeekView anchor={anchor} onEdit={openEdit} onPickDate={(d) => { setAnchor(d); setViewPersisted('day'); }} /> }
           {view === 'month' && <MonthView key={fmt.iso(anchor)} anchor={anchor} onEdit={openEdit} onPickDate={(d) => { setAnchor(d); setViewPersisted('day'); }} />}
@@ -384,16 +361,8 @@ function AppContent() {
         </div>
       </div>
 
-      {/* Mobile-only bottom tab bar: week / dashboard */}
+      {/* Mobile-only bottom tab bar: week / year wheel */}
       <nav className="mobile-bottom-nav" aria-label="Основная навигация">
-        <button
-          className={`mobile-nav-btn ${view === 'dashboard' ? 'active' : ''}`}
-          onClick={() => setViewPersisted('dashboard')}
-          title="Дашборд"
-          aria-label="Дашборд"
-        >
-          <DashboardIcon />
-        </button>
         <button
           className={`mobile-nav-btn ${isCalendarSection ? 'active' : ''}`}
           onClick={() => setViewPersisted('week')}

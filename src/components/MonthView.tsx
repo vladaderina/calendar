@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { addMonths, isSameMonth, isSameDay, startOfMonth } from 'date-fns';
 import type { Task } from '../types';
 import { TaskItem } from './TaskItem';
-import { fmt, monthGrid, taskOnDate, sortByPriority } from '../utils/date';
+import { fmt, monthGrid, sortByPriority, taskDayIndex } from '../utils/date';
 import { store, useTasks } from '../store';
 
 interface Props {
@@ -36,6 +36,17 @@ export function MonthView({ anchor, onEdit, onPickDate }: Props) {
     return Array.from({ length: 36 }, (_, i) => addMonths(start, i - 12));
   }, [anchor]);
 
+  // Every task's days, computed once for the whole rendered range. Looking
+  // tasks up per cell (taskOnDate over all tasks, for every cell, twice) was
+  // the cost behind the lag when switching to this view.
+  const dayIndex = useMemo(() => {
+    // Cover the whole cell grid, including the leading/trailing days of the
+    // neighbouring months that the grid draws.
+    const firstGrid = monthGrid(months[0]);
+    const lastGrid = monthGrid(months[months.length - 1]);
+    return taskDayIndex(tasks, firstGrid[0], lastGrid[lastGrid.length - 1]);
+  }, [tasks, months]);
+
   useEffect(() => {
     if (window.innerWidth <= 720 && anchorRef.current) {
       const contentEl = anchorRef.current.closest('.content') as HTMLElement | null;
@@ -47,10 +58,6 @@ export function MonthView({ anchor, onEdit, onPickDate }: Props) {
     }
   }, []);
 
-  const coloredTasks = (d: Date) =>
-    sortByPriority(
-      tasks.filter((t) => t.startDate && !t.unplanned && taskOnDate(t, d) && t.color)
-    );
 
   const startEditing = (d: Date) => {
     if (editingDay && isSameDay(editingDay, d)) {
@@ -130,8 +137,8 @@ export function MonthView({ anchor, onEdit, onPickDate }: Props) {
               {days.map((d) => {
                 const dayIso = fmt.iso(d);
                 const isEditing = editingDay ? isSameDay(editingDay, d) : false;
-                const dayTasks = sortByPriority(tasks.filter((t) => t.startDate && !t.unplanned && taskOnDate(t, d)));
-                const colors = coloredTasks(d);
+                const dayTasks = sortByPriority(dayIndex.get(dayIso) ?? []);
+                const colors = dayTasks.filter((t) => t.color);
                 const cls = [
                   'month-cell',
                   !isSameMonth(d, m) && 'other-month',
